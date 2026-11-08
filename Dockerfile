@@ -22,7 +22,7 @@ FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine AS runtime
 WORKDIR /app
 
 # Install git (>= 2.38 required for git merge-tree --write-tree), sqlite, and curl for healthcheck
-RUN apk add --no-cache git sqlite sqlite-libs curl bash tzdata \
+RUN apk add --no-cache git sqlite sqlite-libs curl bash tzdata icu-libs ca-certificates \
     && adduser -D -u 10001 -g "" appuser \
     && mkdir -p /app/App_Data/repositories /app/App_Data/temp_worktrees /backups \
     && chown -R appuser:appuser /app /backups
@@ -37,7 +37,8 @@ ENV ASPNETCORE_HTTP_PORTS=5000 \
     ASPNETCORE_ENVIRONMENT="Production" \
     Database__Provider="Sqlite" \
     Database__SqliteConnectionString="Data Source=/app/App_Data/gitea_net.db;Mode=ReadWriteCreate;" \
-    Git__FallbackBinaryPath="/usr/bin/git"
+    Git__FallbackBinaryPath="/usr/bin/git" \
+    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
 
 EXPOSE 5000
 
