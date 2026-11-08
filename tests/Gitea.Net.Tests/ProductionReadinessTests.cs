@@ -59,7 +59,10 @@ public sealed class IsolatedGiteaHost : IDisposable
             }
             var csb = new NpgsqlConnectionStringBuilder(_rawPgConn)
             {
-                SearchPath = $"{_schemaName},public"
+                SearchPath = $"{_schemaName},public",
+                MaxPoolSize = 25,
+                ConnectionIdleLifetime = 1,
+                Timeout = 30
             };
             pgConn = csb.ConnectionString;
         }
@@ -112,11 +115,14 @@ public sealed class IsolatedGiteaHost : IDisposable
         {
             try
             {
+                NpgsqlConnection.ClearAllPools();
                 using var cleanupConn = new NpgsqlConnection(_rawPgConn);
                 cleanupConn.Open();
                 using var cmd = cleanupConn.CreateCommand();
                 cmd.CommandText = $"DROP SCHEMA IF EXISTS \"{_schemaName}\" CASCADE;";
                 cmd.ExecuteNonQuery();
+                cleanupConn.Close();
+                NpgsqlConnection.ClearAllPools();
             }
             catch
             {

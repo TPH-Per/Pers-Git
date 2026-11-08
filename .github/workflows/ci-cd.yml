@@ -82,7 +82,7 @@ jobs:
       - name: Step 5B — Run xUnit Regression Suite on PostgreSQL 16 (Npgsql)
         env:
           GITEA_TEST_PROVIDER: "Postgres"
-          GITEA_POSTGRES_CONN: "Host=127.0.0.1;Port=5432;Database=gitea_net_ci;Username=gitea_ci;Password=gitea_ci_password_2026;Pooling=true;"
+          GITEA_POSTGRES_CONN: "Host=127.0.0.1;Port=5432;Database=gitea_net_ci;Username=gitea_ci;Password=gitea_ci_password_2026;Pooling=true;Maximum Pool Size=25;Connection Idle Lifetime=1;"
         run: |
           dotnet test tests/Gitea.Net.Tests/Gitea.Net.Tests.csproj -c Release --no-build \
             --logger "trx;LogFileName=test_results_postgres.trx" \
