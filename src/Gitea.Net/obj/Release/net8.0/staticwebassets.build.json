@@ -1,0 +1,77 @@
+{
+  "Version": 1,
+  "Hash": "nWgaxzTW6QfLgY5zT62cs3B+CPuZWIFwrp2VeMqS9Wg=",
+  "Source": "Gitea.Net",
+  "BasePath": "_content/Gitea.Net",
+  "Mode": "Default",
+  "ManifestType": "Build",
+  "ReferencedProjectsConfiguration": [],
+  "DiscoveryPatterns": [
+    {
+      "Name": "Gitea.Net\\wwwroot",
+      "Source": "Gitea.Net",
+      "ContentRoot": "C:\\Users\\Per\\Downloads\\Gitea.Net-Production-Ready (2)\\Gitea.Net\\src\\Gitea.Net\\wwwroot\\",
+      "BasePath": "_content/Gitea.Net",
+      "Pattern": "**"
+    }
+  ],
+  "Assets": [
+    {
+      "Identity": "C:\\Users\\Per\\Downloads\\Gitea.Net-Production-Ready (2)\\Gitea.Net\\src\\Gitea.Net\\wwwroot\\css\\app.css",
+      "SourceId": "Gitea.Net",
+      "SourceType": "Discovered",
+      "ContentRoot": "C:\\Users\\Per\\Downloads\\Gitea.Net-Production-Ready (2)\\Gitea.Net\\src\\Gitea.Net\\wwwroot\\",
+      "BasePath": "_content/Gitea.Net",
+      "RelativePath": "css/app.css",
+      "AssetKind": "All",
+      "AssetMode": "All",
+      "AssetRole": "Primary",
+      "AssetMergeBehavior": "PreferTarget",
+      "AssetMergeSource": "",
+      "RelatedAsset": "",
+      "AssetTraitName": "",
+      "AssetTraitValue": "",
+      "CopyToOutputDirectory": "Never",
+      "CopyToPublishDirectory": "PreserveNewest",
+      "OriginalItemSpec": "wwwroot\\css\\app.css"
+    },
+    {
+      "Identity": "C:\\Users\\Per\\Downloads\\Gitea.Net-Production-Ready (2)\\Gitea.Net\\src\\Gitea.Net\\wwwroot\\index.html",
+      "SourceId": "Gitea.Net",
+      "SourceType": "Discovered",
+      "ContentRoot": "C:\\Users\\Per\\Downloads\\Gitea.Net-Production-Ready (2)\\Gitea.Net\\src\\Gitea.Net\\wwwroot\\",
+      "BasePath": "_content/Gitea.Net",
+      "RelativePath": "index.html",
+      "AssetKind": "All",
+      "AssetMode": "All",
+      "AssetRole": "Primary",
+      "AssetMergeBehavior": "PreferTarget",
+      "AssetMergeSource": "",
+      "RelatedAsset": "",
+      "AssetTraitName": "",
+      "AssetTraitValue": "",
+      "CopyToOutputDirectory": "Never",
+      "CopyToPublishDirectory": "PreserveNewest",
+      "OriginalItemSpec": "wwwroot\\index.html"
+    },
+    {
+      "Identity": "C:\\Users\\Per\\Downloads\\Gitea.Net-Production-Ready (2)\\Gitea.Net\\src\\Gitea.Net\\wwwroot\\js\\app.js",
+      "SourceId": "Gitea.Net",
+      "SourceType": "Discovered",
+      "ContentRoot": "C:\\Users\\Per\\Downloads\\Gitea.Net-Production-Ready (2)\\Gitea.Net\\src\\Gitea.Net\\wwwroot\\",
+      "BasePath": "_content/Gitea.Net",
+      "RelativePath": "js/app.js",
+      "AssetKind": "All",
+      "AssetMode": "All",
+      "AssetRole": "Primary",
+      "AssetMergeBehavior": "PreferTarget",
+      "AssetMergeSource": "",
+      "RelatedAsset": "",
+      "AssetTraitName": "",
+      "AssetTraitValue": "",
+      "CopyToOutputDirectory": "Never",
+      "CopyToPublishDirectory": "PreserveNewest",
+      "OriginalItemSpec": "wwwroot\\js\\app.js"
+    }
+  ]
+}

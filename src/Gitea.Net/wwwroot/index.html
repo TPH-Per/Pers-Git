@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gitea.Net — Self-Hosted .NET 8.0 Git Service MVP</title>
+  <link rel="stylesheet" href="/css/app.css" />
+</head>
+<body>
+  <header class="navbar">
+    <div class="navbar-brand" id="navHomeBtn" role="button" tabindex="0">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M6 3v12" />
+        <circle cx="18" cy="6" r="3" />
+        <circle cx="6" cy="18" r="3" />
+        <path d="M18 9a9 9 0 0 1-9 9" />
+      </svg>
+      <span>Gitea.Net</span>
+      <span class="badge" id="dbProviderBadge">SQLite / Postgres</span>
+    </div>
+
+    <div class="navbar-actions">
+      <input type="search" id="repoSearchInput" class="form-control" style="width: 210px;" placeholder="Filter repositories..." aria-label="Filter repositories" />
+      <button type="button" class="btn btn-primary" id="openCreateRepoDialogBtn">+ New Repository</button>
+      <button type="button" class="btn" id="openCommitFileDialogBtn">+ Commit File</button>
+      <button type="button" class="btn" id="openPatDialogBtn">Access Tokens</button>
+      <button type="button" class="btn" id="openAuthDialogBtn">Sign In / Account (<span id="activeActorLabel">Anonymous</span>)</button>
+      <button type="button" class="btn btn-sm" id="logoutBtn" style="display: none;">Sign Out</button>
+      <button type="button" class="btn btn-sm" id="toggleThemeBtn" title="Switch Dark/Light Theme">Theme</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <div class="grid-layout">
+      <aside>
+        <div class="card">
+          <div class="card-header">
+            <span>Accessible Repositories</span>
+            <span class="badge" id="repoCountBadge">0</span>
+          </div>
+          <div id="repoListContainer"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span>Git Engine &amp; Security Architecture</span>
+          </div>
+          <div class="card-body" style="font-size: 0.82rem; color: var(--text-secondary);">
+            <div><strong>Git Engine:</strong> <span id="gitBinaryStatus">git</span> (Plumbing Mode)</div>
+            <div style="margin-top: 0.35rem;"><strong>Counters:</strong> O(1) Maintained Columns</div>
+            <div style="margin-top: 0.35rem;"><strong>PR Merge:</strong> 3-Phase Atomic DB CAS + Reconciler</div>
+            <div style="margin-top: 0.35rem;"><strong>Auth:</strong> HttpOnly Cookie + CSRF + Scoped PAT</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span>Admin Audit Stream</span>
+          </div>
+          <div id="auditLogContainer" class="card-body" style="padding: 0.75rem; font-size: 0.8rem; max-height: 260px; overflow-y: auto;"></div>
+        </div>
+      </aside>
+
+      <section>
+        <div class="card" id="repoHeaderCard">
+          <div class="card-header">
+            <div>
+              <span id="activeRepoTitle" style="font-size: 1.15rem; font-weight: 700;">gitea-admin / gitea-dotnet-core</span>
+              <span class="badge" id="activeRepoVisibility" style="margin-left: 0.5rem;">Public</span>
+            </div>
+            <div style="display: flex; gap: 0.5rem; align-items: center;">
+              <button type="button" class="btn btn-sm" id="starRepoBtn">★ Star (<span id="starCountLabel">0</span>)</button>
+              <button type="button" class="btn btn-sm" id="openCreateBranchDialogBtn">+ Branch</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <p id="activeRepoDesc" style="margin: 0 0 0.85rem 0; color: var(--text-secondary);"></p>
+            <div style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
+              <label for="branchSelector" style="font-size: 0.84rem; font-weight: 600;">Branch:</label>
+              <select id="branchSelector" class="form-control" style="width: auto; min-width: 180px;"></select>
+              <code id="cloneUrlBox" style="padding: 0.4rem 0.7rem; background: var(--bg-input); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); font-size: 0.8rem;"></code>
+              <button type="button" class="btn btn-sm" id="copyCloneUrlBtn">Copy Clone URL</button>
+            </div>
+          </div>
+        </div>
+
+        <nav class="tabs" aria-label="Repository sections">
+          <button type="button" class="tab-btn active" data-tab="code">Code &amp; Files</button>
+          <button type="button" class="tab-btn" data-tab="commits">Commits</button>
+          <button type="button" class="tab-btn" data-tab="issues">Issues (<span id="tabIssuesCount">0</span>)</button>
+          <button type="button" class="tab-btn" data-tab="pulls">Pull Requests (<span id="tabPullsCount">0</span>)</button>
+          <button type="button" class="tab-btn" data-tab="collaborators">Collaborators</button>
+          <button type="button" class="tab-btn" data-tab="webhooks">Webhooks</button>
+        </nav>
+
+        <div id="tabPanel-code" class="tab-panel">
+          <div class="card">
+            <div class="card-header">
+              <span id="currentTreePathLabel">Root Directory (/)</span>
+              <button type="button" class="btn btn-sm" id="treeUpBtn" style="display: none;">↑ Parent Directory</button>
+            </div>
+            <table class="file-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>SHA</th>
+                  <th style="text-align: right;">Size</th>
+                </tr>
+              </thead>
+              <tbody id="fileTreeTableBody"></tbody>
+            </table>
+          </div>
+
+          <div class="card" id="blobViewerCard" style="display: none;">
+            <div class="card-header">
+              <span id="blobFileNameLabel">File Preview</span>
+              <button type="button" class="btn btn-sm" id="closeBlobViewerBtn">Close</button>
+            </div>
+            <pre class="code-viewer" id="blobContentPre"></pre>
+          </div>
+        </div>
+
+        <div id="tabPanel-commits" class="tab-panel" style="display: none;">
+          <div class="card">
+            <div class="card-header">
+              <span>Commit Log</span>
+            </div>
+            <div id="commitsListContainer"></div>
+          </div>
+        </div>
+
+        <div id="tabPanel-issues" class="tab-panel" style="display: none;">
+          <div class="card">
+            <div class="card-header">
+              <span>Repository Issues (Shared Sequence)</span>
+              <button type="button" class="btn btn-primary btn-sm" id="openCreateIssueDialogBtn">+ New Issue</button>
+            </div>
+            <div id="issuesListContainer"></div>
+          </div>
+
+          <div class="card" id="issueDetailCard" style="display: none;">
+            <div class="card-header">
+              <span id="issueDetailTitle">Issue Detail</span>
+              <div style="display: flex; gap: 0.5rem;">
+                <button type="button" class="btn btn-sm" id="toggleIssueStateBtn">Toggle State</button>
+              </div>
+            </div>
+            <div class="card-body">
+              <p id="issueDetailBody" style="white-space: pre-wrap; margin-top: 0;"></p>
+              <div id="issueCommentsContainer" style="margin-top: 1rem; border-top: 1px solid var(--border-subtle); padding-top: 1rem;"></div>
+              <form id="addCommentForm" style="margin-top: 1rem;">
+                <div class="form-group">
+                  <label class="form-label" for="newCommentBody">Add Comment</label>
+                  <textarea id="newCommentBody" class="form-control" required placeholder="Write a comment..."></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary btn-sm">Post Comment</button>
+              </form>
+            </div>
+          </div>
+        </div>
+
+        <div id="tabPanel-pulls" class="tab-panel" style="display: none;">
+          <div class="card">
+            <div class="card-header">
+              <span>Pull Requests</span>
+              <button type="button" class="btn btn-primary btn-sm" id="openCreatePrDialogBtn">+ New Pull Request</button>
+            </div>
+            <div id="pullsListContainer"></div>
+          </div>
+
+          <div class="card" id="prDetailCard" style="display: none;">
+            <div class="card-header">
+              <span id="prDetailTitle">Pull Request Detail</span>
+              <div style="display: flex; gap: 0.5rem; align-items: center;">
+                <select id="mergeStrategySelect" class="form-control" style="width: auto; padding: 0.25rem 0.5rem; font-size: 0.8rem;">
+                  <option value="merge">Merge Commit (--no-ff)</option>
+                  <option value="squash">Squash Commit</option>
+                  <option value="fast-forward">Fast-Forward Only</option>
+                </select>
+                <button type="button" class="btn btn-primary btn-sm" id="mergePrBtn">Merge Pull Request</button>
+                <button type="button" class="btn btn-sm" id="togglePrStateBtn">Close / Reopen</button>
+              </div>
+            </div>
+            <div class="card-body">
+              <p id="prDetailMeta" style="font-size: 0.85rem; color: var(--text-secondary);"></p>
+              <p id="prDetailBody" style="white-space: pre-wrap;"></p>
+              <h4 style="margin-bottom: 0.5rem;">Unified Git Diff</h4>
+              <pre class="code-viewer" id="prDiffViewer"></pre>
+            </div>
+          </div>
+        </div>
+
+        <div id="tabPanel-collaborators" class="tab-panel" style="display: none;">
+          <div class="card">
+            <div class="card-header">
+              <span>Repository Collaborators (Owner / Collaborator / Public-Read Matrix)</span>
+              <button type="button" class="btn btn-primary btn-sm" id="openAddCollabDialogBtn">+ Add Collaborator</button>
+            </div>
+            <div id="collaboratorsListContainer"></div>
+          </div>
+        </div>
+
+        <div id="tabPanel-webhooks" class="tab-panel" style="display: none;">
+          <div class="card">
+            <div class="card-header">
+              <span>Configured Webhooks (IP-Pinned SSRF Protected &amp; Secret Redacted)</span>
+              <button type="button" class="btn btn-primary btn-sm" id="openCreateWebhookDialogBtn">+ Add Webhook</button>
+            </div>
+            <div id="webhooksListContainer"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- 1. Create Repository Dialog -->
+  <dialog class="gitea-dialog" id="createRepoDialog" aria-labelledby="createRepoDialogTitle">
+    <form id="createRepoForm" method="dialog">
+      <div class="dialog-header">
+        <span id="createRepoDialogTitle">Create New Repository</span>
+        <button type="button" class="btn btn-sm" data-close-dialog="createRepoDialog">✕</button>
+      </div>
+      <div class="dialog-body">
+        <div class="form-group">
+          <label class="form-label" for="repoNameInput">Repository Name</label>
+          <input type="text" id="repoNameInput" class="form-control" required pattern="^[a-zA-Z0-9][a-zA-Z0-9_\-\.]{1,62}$" placeholder="e.g. payment-engine-core" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="repoDescInput">Description</label>
+          <input type="text" id="repoDescInput" class="form-control" placeholder="Short summary of this repository" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="repoDefaultBranchInput">Default Branch</label>
+          <input type="text" id="repoDefaultBranchInput" class="form-control" value="main" required />
+        </div>
+        <div class="form-group">
+          <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.88rem;">
+            <input type="checkbox" id="repoIsPrivateInput" />
+            Private Repository (Returns 404 to unauthorized users)
+          </label>
+        </div>
+        <div class="form-group">
+          <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.88rem;">
+            <input type="checkbox" id="repoInitReadmeInput" checked />
+            Initialize bare repository with README.md commit
+          </label>
+        </div>
+      </div>
+      <div class="dialog-footer">
+        <button type="button" class="btn" data-close-dialog="createRepoDialog">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create Repository</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 2. Commit File Dialog -->
+  <dialog class="gitea-dialog" id="commitFileDialog" aria-labelledby="commitFileDialogTitle">
+    <form id="commitFileForm" method="dialog">
+      <div class="dialog-header">
+        <span id="commitFileDialogTitle">Commit File via Git Plumbing</span>
+        <button type="button" class="btn btn-sm" data-close-dialog="commitFileDialog">✕</button>
+      </div>
+      <div class="dialog-body">
+        <div class="form-group">
+          <label class="form-label" for="commitBranchInput">Target Branch</label>
+          <input type="text" id="commitBranchInput" class="form-control" value="main" required />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="commitPathInput">Relative File Path (supports .gitignore, .github/workflows/ci.yml)</label>
+          <input type="text" id="commitPathInput" class="form-control" placeholder=".github/workflows/ci.yml" required />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="commitContentInput">File Content</label>
+          <textarea id="commitContentInput" class="form-control" required placeholder="name: CI"></textarea>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="commitMessageInput">Commit Message</label>
+          <input type="text" id="commitMessageInput" class="form-control" placeholder="feat: add workflow" required />
+        </div>
+      </div>
+      <div class="dialog-footer">
+        <button type="button" class="btn" data-close-dialog="commitFileDialog">Cancel</button>
+        <button type="submit" class="btn btn-primary">Commit Atomically</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 3. Create Branch Dialog -->
+  <dialog class="gitea-dialog" id="createBranchDialog" aria-labelledby="createBranchDialogTitle">
+    <form id="createBranchForm" method="dialog">
+      <div class="dialog-header">
+        <span id="createBranchDialogTitle">Create Git Branch (Zero-OID CAS)</span>
+        <button type="button" class="btn btn-sm" data-close-dialog="createBranchDialog">✕</button>
+      </div>
+      <div class="dialog-body">
+        <div class="form-group">
+          <label class="form-label" for="newBranchNameInput">New Branch Name</label>
+          <input type="text" id="newBranchNameInput" class="form-control" placeholder="feature/high-concurrency" required />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="fromBranchRefInput">Source Branch / Ref</label>
+          <input type="text" id="fromBranchRefInput" class="form-control" value="main" required />
+        </div>
+      </div>
+      <div class="dialog-footer">
+        <button type="button" class="btn" data-close-dialog="createBranchDialog">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create Branch</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 4. Create Issue Dialog -->
+  <dialog class="gitea-dialog" id="createIssueDialog" aria-labelledby="createIssueDialogTitle">
+    <form id="createIssueForm" method="dialog">
+      <div class="dialog-header">
+        <span id="createIssueDialogTitle">Open New Issue</span>
+        <button type="button" class="btn btn-sm" data-close-dialog="createIssueDialog">✕</button>
+      </div>
+      <div class="dialog-body">
+        <div class="form-group">
+          <label class="form-label" for="issueTitleInput">Title</label>
+          <input type="text" id="issueTitleInput" class="form-control" required placeholder="Describe the issue..." />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="issueLabelsInput">Labels (comma-separated, max 255 chars)</label>
+          <input type="text" id="issueLabelsInput" class="form-control" value="bug,production" maxlength="255" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="issueBodyInput">Description</label>
+          <textarea id="issueBodyInput" class="form-control" required placeholder="Steps to reproduce or architectural context..."></textarea>
+        </div>
+      </div>
+      <div class="dialog-footer">
+        <button type="button" class="btn" data-close-dialog="createIssueDialog">Cancel</button>
+        <button type="submit" class="btn btn-primary">Submit Issue</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 5. Create Pull Request Dialog -->
+  <dialog class="gitea-dialog" id="createPrDialog" aria-labelledby="createPrDialogTitle">
+    <form id="createPrForm" method="dialog">
+      <div class="dialog-header">
+        <span id="createPrDialogTitle">Create Pull Request</span>
+        <button type="button" class="btn btn-sm" data-close-dialog="createPrDialog">✕</button>
+      </div>
+      <div class="dialog-body">
+        <div class="form-group">
+          <label class="form-label" for="prTitleInput">Pull Request Title</label>
+          <input type="text" id="prTitleInput" class="form-control" required placeholder="feat: add new module" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="prSourceBranchInput">Source Branch (Head)</label>
+          <input type="text" id="prSourceBranchInput" class="form-control" value="feature/zero-n-plus-one" required />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="prTargetBranchInput">Target Branch (Base)</label>
+          <input type="text" id="prTargetBranchInput" class="form-control" value="main" required />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="prBodyInput">Summary &amp; Test Plan</label>
+          <textarea id="prBodyInput" class="form-control" required placeholder="Explain the changes in this PR..."></textarea>
+        </div>
+      </div>
+      <div class="dialog-footer">
+        <button type="button" class="btn" data-close-dialog="createPrDialog">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create Pull Request</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 6. Add Collaborator Dialog -->
+  <dialog class="gitea-dialog" id="addCollabDialog" aria-labelledby="addCollabDialogTitle">
+    <form id="addCollabForm" method="dialog">
+      <div class="dialog-header">
+        <span id="addCollabDialogTitle">Add Repository Collaborator</span>
+        <button type="button" class="btn btn-sm" data-close-dialog="addCollabDialog">✕</button>
+      </div>
+      <div class="dialog-body">
+        <div class="form-group">
+          <label class="form-label" for="collabUsernameInput">Username</label>
+          <input type="text" id="collabUsernameInput" class="form-control" required placeholder="linus-dev" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="collabPermissionSelect">Permission Level</label>
+          <select id="collabPermissionSelect" class="form-control">
+            <option value="read">Read (Clone &amp; View Only)</option>
+            <option value="write" selected>Write (Push, Branch &amp; Merge PRs)</option>
+            <option value="admin">Admin (Manage Collaborators &amp; Webhooks)</option>
+          </select>
+        </div>
+      </div>
+      <div class="dialog-footer">
+        <button type="button" class="btn" data-close-dialog="addCollabDialog">Cancel</button>
+        <button type="submit" class="btn btn-primary">Grant Access</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 7. Create Webhook Dialog -->
+  <dialog class="gitea-dialog" id="createWebhookDialog" aria-labelledby="createWebhookDialogTitle">
+    <form id="createWebhookForm" method="dialog">
+      <div class="dialog-header">
+        <span id="createWebhookDialogTitle">Add Repository Webhook (IP-Pinned SSRF Checked)</span>
+        <button type="button" class="btn btn-sm" data-close-dialog="createWebhookDialog">✕</button>
+      </div>
+      <div class="dialog-body">
+        <div class="form-group">
+          <label class="form-label" for="webhookUrlInput">External Payload Target URL</label>
+          <input type="url" id="webhookUrlInput" class="form-control" required placeholder="https://ci.example.com/gitea-webhook" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="webhookSecretInput">HMAC-SHA256 Secret (leave blank to auto-generate)</label>
+          <input type="password" id="webhookSecretInput" class="form-control" placeholder="whsec_..." />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="webhookEventsInput">Events</label>
+          <input type="text" id="webhookEventsInput" class="form-control" value="push,issues,pull_request" required />
+        </div>
+      </div>
+      <div class="dialog-footer">
+        <button type="button" class="btn" data-close-dialog="createWebhookDialog">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save Webhook</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 8. Personal Access Token (PAT) Management Dialog -->
+  <dialog class="gitea-dialog" id="patDialog" aria-labelledby="patDialogTitle">
+    <div class="dialog-header">
+      <span id="patDialogTitle">Personal Access Tokens (Scoped &amp; Revocable)</span>
+      <button type="button" class="btn btn-sm" data-close-dialog="patDialog">✕</button>
+    </div>
+    <div class="dialog-body">
+      <form id="createPatForm">
+        <div class="form-group">
+          <label class="form-label" for="patNameInput">Token Description</label>
+          <input type="text" id="patNameInput" class="form-control" required placeholder="Windows Laptop Git CLI" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="patScopesInput">Granular Scopes (comma-separated: repo:read, repo:write, issue:write, pull:write, admin)</label>
+          <input type="text" id="patScopesInput" class="form-control" value="repo:read,repo:write,issue:write,pull:write" required />
+        </div>
+        <button type="submit" class="btn btn-primary btn-sm">Generate Token</button>
+      </form>
+
+      <div id="generatedPatBox" style="display: none; padding: 0.75rem; background: var(--bg-elevated); border: 1px solid var(--brand-primary); border-radius: var(--radius-sm); margin-top: 0.75rem;">
+        <div style="font-size: 0.8rem; font-weight: 700; color: var(--brand-primary);">Copy your Personal Access Token now (shown only once):</div>
+        <code id="generatedPatValue" style="display: block; margin-top: 0.35rem; word-break: break-all; font-size: 0.85rem;"></code>
+      </div>
+
+      <hr style="border: 0; border-top: 1px solid var(--border-subtle); margin: 1rem 0;" />
+      <h4 style="margin: 0 0 0.5rem 0; font-size: 0.9rem;">Active Tokens</h4>
+      <div id="patListContainer" style="font-size: 0.82rem;"></div>
+    </div>
+  </dialog>
+
+  <!-- 9. Real Login & Register Dialog (No Password Hints) -->
+  <dialog class="gitea-dialog" id="authDialog" aria-labelledby="authDialogTitle">
+    <div class="dialog-header">
+      <span id="authDialogTitle">Sign In or Register Account</span>
+      <button type="button" class="btn btn-sm" data-close-dialog="authDialog">✕</button>
+    </div>
+    <div class="dialog-body">
+      <form id="authLoginForm">
+        <h4 style="margin: 0 0 0.75rem 0;">Sign In (HttpOnly Session Cookie)</h4>
+        <div class="form-group">
+          <label class="form-label" for="loginUsername">Username</label>
+          <input type="text" id="loginUsername" class="form-control" required placeholder="Enter username" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="loginPassword">Password</label>
+          <input type="password" id="loginPassword" class="form-control" required placeholder="••••••••" />
+        </div>
+        <button type="submit" class="btn btn-primary" style="width: 100%;">Sign In</button>
+      </form>
+
+      <hr style="border: 0; border-top: 1px solid var(--border-subtle); margin: 1.25rem 0;" />
+
+      <form id="authRegisterForm">
+        <h4 style="margin: 0 0 0.75rem 0;">Register New Developer Account</h4>
+        <div class="form-group">
+          <label class="form-label" for="regUsername">Username</label>
+          <input type="text" id="regUsername" class="form-control" required placeholder="ada-lovelace" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="regEmail">Email</label>
+          <input type="email" id="regEmail" class="form-control" required placeholder="ada@example.org" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="regFullName">Full Name</label>
+          <input type="text" id="regFullName" class="form-control" required placeholder="Ada Lovelace" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="regPassword">Password (min 8 chars, hashed with 600k PBKDF2-SHA256)</label>
+          <input type="password" id="regPassword" class="form-control" required placeholder="••••••••" />
+        </div>
+        <button type="submit" class="btn" style="width: 100%;">Create Account</button>
+      </form>
+    </div>
+  </dialog>
+
+  <!-- 10. Confirmation Dialog -->
+  <dialog class="gitea-dialog" id="confirmActionDialog" aria-labelledby="confirmDialogTitle">
+    <div class="dialog-header">
+      <span id="confirmDialogTitle">Confirm Action</span>
+    </div>
+    <div class="dialog-body">
+      <p id="confirmDialogMessage" style="margin: 0;"></p>
+    </div>
+    <div class="dialog-footer">
+      <button type="button" class="btn" id="confirmDialogCancelBtn">Cancel</button>
+      <button type="button" class="btn btn-primary" id="confirmDialogOkBtn">Confirm</button>
+    </div>
+  </dialog>
+
+  <div class="snackbar-viewport" id="snackbarViewport" role="region" aria-live="polite" aria-label="Notifications"></div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
