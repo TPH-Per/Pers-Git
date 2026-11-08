@@ -101,7 +101,7 @@ jobs:
 
       - name: Step 6 — Verify Online SQLite Hot Backup Script
         run: |
-          chmod +x scripts/sqlite_hot_backup.sh
+          chmod +x verify_all.sh scripts/sqlite_hot_backup.sh
           ./verify_all.sh
 
       - name: Upload Verification Logs, TRX Test Results & JTL Reports
