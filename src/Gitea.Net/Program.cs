@@ -469,8 +469,8 @@ app.MapPost("/api/v1/admin/backup", async (HttpContext ctx, IHostEnvironment env
 app.MapGet("/metrics", async (HttpContext ctx, GiteaDbRepository db, KeyedLockProvider locks, CancellationToken ct) =>
 {
     var remoteIp = ctx.Connection.RemoteIpAddress;
-    bool isLoopback = remoteIp is null || System.Net.IPAddress.IsLoopback(remoteIp);
-    if (!isLoopback)
+    bool isInternal = IsInternalOrLoopback(remoteIp);
+    if (!isInternal)
     {
         var actor = await GetAuthenticatedUserAsync(ctx, db);
         if (actor is null || !actor.IsAdmin)
@@ -1397,6 +1397,44 @@ app.MapPost("/{owner}/{repo}.git/{service:regex(^(git-upload-pack|git-receive-pa
 
     return Results.Empty;
 });
+
+
+static bool IsInternalOrLoopback(System.Net.IPAddress? ip)
+{
+    if (ip is null || System.Net.IPAddress.IsLoopback(ip))
+        return true;
+
+    if (ip.IsIPv4MappedToIPv6)
+        ip = ip.MapToIPv4();
+
+    Span<byte> bytes = stackalloc byte[16];
+    if (!ip.TryWriteBytes(bytes, out int written))
+        return false;
+
+    if (written == 4)
+    {
+        // 10.0.0.0/8
+        if (bytes[0] == 10) return true;
+        // 172.16.0.0/12 (Docker bridge networks 172.16.0.0 - 172.31.255.255)
+        if (bytes[0] == 172 && (bytes[1] & 0xF0) == 0x10) return true;
+        // 192.168.0.0/16
+        if (bytes[0] == 192 && bytes[1] == 168) return true;
+        // 127.0.0.0/8
+        if (bytes[0] == 127) return true;
+        return false;
+    }
+
+    if (written == 16)
+    {
+        // RFC 4193 ULA fc00::/7
+        if ((bytes[0] & 0xFE) == 0xFC) return true;
+        // Link-local fe80::/10
+        if (bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80) return true;
+        return false;
+    }
+
+    return false;
+}
 
 app.Run();
 
