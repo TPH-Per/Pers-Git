@@ -32,7 +32,8 @@ COPY --chown=appuser:appuser scripts/sqlite_hot_backup.sh /app/scripts/sqlite_ho
 RUN chmod +x /app/scripts/sqlite_hot_backup.sh
 
 USER 10001
-ENV ASPNETCORE_URLS="http://+:5000" \
+ENV ASPNETCORE_HTTP_PORTS=5000 \
+    ASPNETCORE_URLS="http://+:5000" \
     ASPNETCORE_ENVIRONMENT="Production" \
     Database__Provider="Sqlite" \
     Database__SqliteConnectionString="Data Source=/app/App_Data/gitea_net.db;Mode=ReadWriteCreate;" \

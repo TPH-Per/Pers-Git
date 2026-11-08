@@ -2,9 +2,9 @@ name: Per's Git — Self-Hosted Gitea Actions CI/CD Pipeline
 
 on:
   push:
-    branches: [ "main", "master", "develop", "feature/**" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "main", "master", "develop" ]
+    branches: [ "main" ]
 
 env:
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true

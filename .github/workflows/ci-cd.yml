@@ -2,9 +2,9 @@ name: Per's Git (Gitea.Net) — Production CI/CD Pipeline
 
 on:
   push:
-    branches: [ "main", "master", "develop", "feature/**" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "main", "master", "develop" ]
+    branches: [ "main" ]
   workflow_dispatch:
 
 permissions:
@@ -131,20 +131,39 @@ jobs:
         run: |
           docker run -d --name pers-git-smoke \
             -p 5000:5000 \
+            -e ASPNETCORE_HTTP_PORTS=5000 \
+            -e ASPNETCORE_URLS="http://+:5000" \
             -e ASPNETCORE_ENVIRONMENT=Development \
             -e GITEA_NET_TOKEN_SECRET="DockerSmokeTest-32Byte-Minimum-SecretKey-2026!" \
             pers-git-server:ci-release
 
-          for i in {1..20}; do
-            if curl -fsS http://127.0.0.1:5000/api/v1/health; then
-              echo "Container is healthy!"
+          echo "Waiting for container to become healthy on port 5000..."
+          healthy=0
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:5000/api/v1/health 2>/dev/null; then
+              echo "Container is healthy! (attempt $i)"
+              healthy=1
               break
             fi
             sleep 1
           done
 
+          if [ $healthy -ne 1 ]; then
+            echo "❌ Smoke test timed out waiting for /api/v1/health! Container logs:"
+            docker logs pers-git-smoke
+            exit 1
+          fi
+
           curl -fsS http://127.0.0.1:5000/api/v1/health | grep -q "healthy"
           curl -fsS http://127.0.0.1:5000/metrics | grep -q "pers_git_up 1"
           git clone http://127.0.0.1:5000/gitea-admin/gitea-dotnet-core.git /tmp/smoke_clone
           test -f /tmp/smoke_clone/README.md
+          echo "✅ Smoke test completed successfully (HTTP Health, Metrics, Git Smart HTTP Clone)!"
           docker rm -f pers-git-smoke
+
+      - name: Dump Container Logs on Failure
+        if: failure()
+        run: |
+          echo "=== DOCKER CONTAINER LOGS ON FAILURE ==="
+          docker logs pers-git-smoke || true
+          docker rm -f pers-git-smoke || true

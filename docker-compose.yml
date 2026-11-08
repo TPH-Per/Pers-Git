@@ -9,6 +9,7 @@ services:
     restart: unless-stopped
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_HTTP_PORTS=5000
       - ASPNETCORE_URLS=http://+:5000
       - GITEA_NET_TOKEN_SECRET=${GITEA_NET_TOKEN_SECRET:-PersGit-Production-Ready-32Byte-Minimum-Secret-Key-2026!}
       - Database__Provider=${DB_PROVIDER:-Sqlite}
