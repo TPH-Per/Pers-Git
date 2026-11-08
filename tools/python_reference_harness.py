@@ -18,6 +18,7 @@ import http.server
 import ipaddress
 import json
 import os
+import platform
 import re
 import shutil
 import socketserver
@@ -690,7 +691,7 @@ def run_harness():
         tf.write(f"""================================================================================
 GITEA.NET SANDBOX ENVIRONMENT & TOOLCHAIN AUDIT ({now_iso})
 ================================================================================
-- OS / Kernel      : {os.uname().sysname} {os.uname().release} ({os.uname().machine})
+- OS / Kernel      : {platform.system()} {platform.release()} ({platform.machine()})
 - Git CLI          : {git_ver} (AVAILABLE & EXECUTED)
 - Python 3         : {py_ver} (AVAILABLE & EXECUTED)
 - SQLite 3         : {sqlite3.sqlite_version} (AVAILABLE & EXECUTED)
