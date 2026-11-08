@@ -157,15 +157,15 @@ public sealed class GiteaDbRepository
 
     public GiteaDbRepository(IConfiguration configuration, IHostEnvironment env, ILogger<GiteaDbRepository> logger)
     {
-        _provider = Environment.GetEnvironmentVariable("GITEA_TEST_PROVIDER")
-                    ?? configuration["Database:Provider"]
+        _provider = configuration["Database:Provider"]
+                    ?? Environment.GetEnvironmentVariable("GITEA_TEST_PROVIDER")
                     ?? "Sqlite";
         _logger = logger;
 
         if (IsPostgres)
         {
-            string? pgConn = Environment.GetEnvironmentVariable("GITEA_POSTGRES_CONN")
-                             ?? configuration["Database:PostgresConnectionString"];
+            string? pgConn = configuration["Database:PostgresConnectionString"]
+                             ?? Environment.GetEnvironmentVariable("GITEA_POSTGRES_CONN");
             if (string.IsNullOrWhiteSpace(pgConn))
             {
                 throw new InvalidOperationException(
@@ -230,7 +230,14 @@ public sealed class GiteaDbRepository
                 """, ct);
         }
 
-        string idPk = IsPostgres ? "BIGSERIAL PRIMARY KEY" : "INTEGER PRIMARY KEY AUTOINCREMENT";
+        if (IsPostgres)
+        {
+            await ExecuteNonQueryAsync(conn, null, "SELECT pg_advisory_lock(718293041);", ct);
+        }
+
+        try
+        {
+            string idPk = IsPostgres ? "BIGSERIAL PRIMARY KEY" : "INTEGER PRIMARY KEY AUTOINCREMENT";
         string tsType = IsPostgres ? "TIMESTAMPTZ" : "TEXT";
         string nocase = IsPostgres ? "" : "COLLATE NOCASE";
 
@@ -465,8 +472,23 @@ public sealed class GiteaDbRepository
         await ExecuteNonQueryAsync(conn, null, recordV1Sql, ct, ("@now", NowParam()));
         await ExecuteNonQueryAsync(conn, null, recordV2Sql, ct, ("@now", NowParam()));
 
-        await ReconcileMaintainedCountersAsync(conn, ct);
-        _logger.LogInformation("Database schema v2 initialized using provider {Provider}", _provider);
+            await ReconcileMaintainedCountersAsync(conn, ct);
+            _logger.LogInformation("Database schema v2 initialized using provider {Provider}", _provider);
+        }
+        finally
+        {
+            if (IsPostgres)
+            {
+                try
+                {
+                    await ExecuteNonQueryAsync(conn, null, "SELECT pg_advisory_unlock(718293041);", CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Failed to release pg advisory lock");
+                }
+            }
+        }
     }
 
     private async Task TryEnsureColumnExistsAsync(DbConnection conn, string table, string column, string definition, CancellationToken ct)
@@ -2084,7 +2106,26 @@ public sealed class GiteaDbRepository
     }
 
 
-    // ==================== CI/CD ACTIONS WORKFLOW RUNS (ATOMIC SEQUENCE + CAS + ZERO N+1) ====================
+    // ==================== CI/CD ACTIONS WORKFLOW RUNS (ATOMIC SEQUENCE + CAS + REAPER + ZERO N+1) ====================
+
+    public Task<CiWorkflowRunEntity> CreateCiWorkflowRunAsync(
+        long repoId,
+        string workflowName,
+        string triggerEvent,
+        string branch,
+        string? commitSha,
+        long? triggeredByUserId,
+        CancellationToken ct = default)
+    {
+        return CreateCiWorkflowRunAsync(
+            repoId,
+            triggeredByUserId ?? 1L,
+            workflowName,
+            triggerEvent,
+            branch,
+            string.IsNullOrWhiteSpace(commitSha) ? "0000000000000000000000000000000000000000" : commitSha.Trim(),
+            ct);
+    }
 
     public async Task<CiWorkflowRunEntity> CreateCiWorkflowRunAsync(
         long repoId,
@@ -2124,6 +2165,7 @@ public sealed class GiteaDbRepository
                   SELECT last_insert_rowid();
                   """;
 
+            long insertedId;
             await using (var cmd = CreateCommand(conn, tx, insertSql,
                 ("@repoId", repoId),
                 ("@runIdx", runIndex),
@@ -2134,110 +2176,66 @@ public sealed class GiteaDbRepository
                 ("@sha", commitSha),
                 ("@now", now)))
             {
-                _ = await cmd.ExecuteScalarAsync(ct);
+                insertedId = Convert.ToInt64(await cmd.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
             }
 
             await tx.CommitAsync(ct);
-            return (await GetCiWorkflowRunAsync(repoId, runIndex, ct))!;
+            return (await GetCiWorkflowRunByIdAsync(repoId, insertedId, ct))!;
         }, ct);
     }
 
-    public Task<CiWorkflowRunEntity> CreateCiWorkflowRunAsync(
-        long repoId,
-        string workflowName,
-        string triggerEvent,
-        string branch,
-        string? commitSha,
-        long? triggeredByUserId,
-        CancellationToken ct = default)
-    {
-        return CreateCiWorkflowRunAsync(
-            repoId,
-            triggeredByUserId ?? 1,
-            workflowName,
-            triggerEvent,
-            branch,
-            string.IsNullOrWhiteSpace(commitSha) ? "0000000000000000000000000000000000000000" : commitSha,
-            ct);
-    }
-
+    /// <summary>
+    /// Atomic CAS worker claim matching strictly by Primary Key `id = @runId` and `status = 'queued'`.
+    /// Prevents multi-row ambiguity when `run_index` of one row equals `id` of another row.
+    /// </summary>
     public async Task<bool> TryClaimQueuedCiRunAsync(
-        long repoId, long runIdOrIndex, CancellationToken ct = default)
+        long repoId, long runId, CancellationToken ct = default)
     {
-        await using var conn = CreateConnection();
-        await conn.OpenAsync(ct);
+        return await ExecuteWithRetryAsync(async () =>
+        {
+            await using var conn = CreateConnection();
+            await conn.OpenAsync(ct);
 
-        const string sql = """
-            UPDATE ci_workflow_runs
-            SET status = 'running',
-                row_version = row_version + 1
-            WHERE repo_id = @repoId
-              AND id = @runId
-              AND status = 'queued';
-            """;
+            const string sql = """
+                UPDATE ci_workflow_runs
+                SET status = 'running',
+                    row_version = row_version + 1
+                WHERE repo_id = @repoId
+                  AND id = @runId
+                  AND status = 'queued';
+                """;
 
-        int affected = await ExecuteNonQueryAsync(conn, null, sql, ct,
-            ("@repoId", repoId),
-            ("@runId", runIdOrIndex));
-        return affected == 1;
-    }
-
-    public async Task<CiWorkflowRunEntity?> GetCiWorkflowRunByIdOrIndexAsync(
-        long repoId, long runIdOrIndex, CancellationToken ct = default)
-    {
-        await using var conn = CreateConnection();
-        await conn.OpenAsync(ct);
-
-        const string sql = """
-            SELECT
-                c.id,
-                c.repo_id,
-                c.run_index,
-                c.triggered_by_user_id,
-                u.username AS triggered_by_username,
-                c.workflow_name,
-                c.trigger_event,
-                c.branch,
-                c.commit_sha,
-                c.status,
-                c.logs_text,
-                c.duration_ms,
-                c.created_at,
-                c.completed_at,
-                c.row_version
-            FROM ci_workflow_runs c
-            INNER JOIN users u ON u.id = c.triggered_by_user_id
-            WHERE c.repo_id = @repoId AND (c.id = @idOrIdx OR c.run_index = @idOrIdx)
-            LIMIT 1;
-            """;
-
-        await using var cmd = CreateCommand(conn, null, sql, ("@repoId", repoId), ("@idOrIdx", runIdOrIndex));
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        if (!await reader.ReadAsync(ct)) return null;
-        return MapCiWorkflowRun(reader);
+            int affected = await ExecuteNonQueryAsync(conn, null, sql, ct,
+                ("@repoId", repoId),
+                ("@runId", runId));
+            return affected == 1;
+        }, ct);
     }
 
     public async Task<bool> TryClaimQueuedCiRunAsync(
         long repoId, long runIndex, long expectedRowVersion, CancellationToken ct = default)
     {
-        await using var conn = CreateConnection();
-        await conn.OpenAsync(ct);
+        return await ExecuteWithRetryAsync(async () =>
+        {
+            await using var conn = CreateConnection();
+            await conn.OpenAsync(ct);
 
-        const string sql = """
-            UPDATE ci_workflow_runs
-            SET status = 'running',
-                row_version = row_version + 1
-            WHERE repo_id = @repoId
-              AND run_index = @runIdx
-              AND status = 'queued'
-              AND row_version = @expectedRv;
-            """;
+            const string sql = """
+                UPDATE ci_workflow_runs
+                SET status = 'running',
+                    row_version = row_version + 1
+                WHERE repo_id = @repoId
+                  AND run_index = @runIdx
+                  AND status = 'queued'
+                  AND row_version = @expectedRv;
+                """;
 
-        int affected = await ExecuteNonQueryAsync(conn, null, sql, ct,
-            ("@repoId", repoId),
-            ("@runIdx", runIndex),
-            ("@expectedRv", expectedRowVersion));
-        return affected == 1;
+            int affected = await ExecuteNonQueryAsync(conn, null, sql, ct,
+                ("@repoId", repoId),
+                ("@runIdx", runIndex),
+                ("@expectedRv", expectedRowVersion));
+            return affected == 1;
+        }, ct);
     }
 
     public async Task<bool> CompleteCiWorkflowRunAsync(
@@ -2269,6 +2267,79 @@ public sealed class GiteaDbRepository
                 ("@runIdx", runIndex));
             return affected == 1;
         }, ct);
+    }
+
+    /// <summary>
+    /// QA Review Council Member #3 (Lead QA Engineer): Stuck CI/CD Run Reaper.
+    /// Automatically recovers orphaned CI runs stuck in `'running'` or `'queued'` state after an unexpected
+    /// power outage or process crash by transitioning them atomically to `'failed'`.
+    /// </summary>
+    public async Task<int> ReapStuckCiWorkflowRunsAsync(TimeSpan stuckThreshold, CancellationToken ct = default)
+    {
+        return await ExecuteWithRetryAsync(async () =>
+        {
+            await using var conn = CreateConnection();
+            await conn.OpenAsync(ct);
+
+            var cutoff = DateTimeOffset.UtcNow.Subtract(stuckThreshold);
+            string sql = IsPostgres
+                ? """
+                  UPDATE ci_workflow_runs
+                  SET status = 'failed',
+                      logs_text = logs_text || CHR(10) || '[REAPER] Pipeline finished with status: FAILED (Orphaned/stuck run reaped after unexpected host restart or timeout).',
+                      completed_at = @now,
+                      row_version = row_version + 1
+                  WHERE status IN ('running', 'queued')
+                    AND created_at <= @cutoff;
+                  """
+                : """
+                  UPDATE ci_workflow_runs
+                  SET status = 'failed',
+                      logs_text = logs_text || CHAR(10) || '[REAPER] Pipeline finished with status: FAILED (Orphaned/stuck run reaped after unexpected host restart or timeout).',
+                      completed_at = @now,
+                      row_version = row_version + 1
+                  WHERE status IN ('running', 'queued')
+                    AND created_at <= @cutoff;
+                  """;
+
+            return await ExecuteNonQueryAsync(conn, null, sql, ct,
+                ("@now", NowParam()),
+                ("@cutoff", FormatTimestampParam(cutoff)));
+        }, ct);
+    }
+
+    public async Task<CiWorkflowRunEntity?> GetCiWorkflowRunByIdAsync(long repoId, long runId, CancellationToken ct = default)
+    {
+        await using var conn = CreateConnection();
+        await conn.OpenAsync(ct);
+
+        const string sql = """
+            SELECT
+                c.id,
+                c.repo_id,
+                c.run_index,
+                c.triggered_by_user_id,
+                u.username AS triggered_by_username,
+                c.workflow_name,
+                c.trigger_event,
+                c.branch,
+                c.commit_sha,
+                c.status,
+                c.logs_text,
+                c.duration_ms,
+                c.created_at,
+                c.completed_at,
+                c.row_version
+            FROM ci_workflow_runs c
+            INNER JOIN users u ON u.id = c.triggered_by_user_id
+            WHERE c.repo_id = @repoId AND c.id = @runId
+            LIMIT 1;
+            """;
+
+        await using var cmd = CreateCommand(conn, null, sql, ("@repoId", repoId), ("@runId", runId));
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return null;
+        return MapCiWorkflowRun(reader);
     }
 
     public async Task<CiWorkflowRunEntity?> GetCiWorkflowRunAsync(long repoId, long runIndex, CancellationToken ct = default)

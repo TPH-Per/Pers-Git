@@ -8,23 +8,35 @@ using Gitea.Net.Models;
 namespace Gitea.Net.Services;
 
 /// <summary>
-/// Built-in CI/CD Actions Pipeline Runner Engine (`BackgroundService` + `Channel&lt;CiRunTriggerItem&gt;`).
+/// Built-in CI/CD Actions Pipeline Runner Engine (`BackgroundService` + `Channel&lt;CiRunTriggerItem&gt;` + Orphaned Run Reaper).
 /// Automatically triggers on:
 /// - `git push` over Smart HTTP (`git-receive-pack`)
 /// - Web UI Plumbing Commits (`POST /api/v1/repos/{owner}/{repo}/commits`)
 /// - Pull Request creation &amp; merges
 /// - Manual workflow_dispatch (`POST /api/v1/repos/{owner}/{repo}/actions/runs`)
 ///
-/// Race-Condition &amp; N+1 Guarantees:
+/// Race-Condition, Crash-Recovery &amp; N+1 Guarantees:
 /// - Uses atomic per-repository sequence `repo_counters.last_ci_run_index` so 50 concurrent triggers receive unique `#1..#50` run numbers.
-/// - Claims queued runs using atomic DB Compare-And-Swap (`TryClaimQueuedCiRunAsync` where `status = 'queued' AND row_version = @expectedRowVersion`),
-///   ensuring multiple runner workers never execute the same run twice.
-/// - Inspects the target commit tree in O(1) via `GitEngineService` (`ListTreeAsync`, `.github/workflows`, `.gitea/workflows`),
-///   records structured step-by-step build/test verification logs, and dispatches a `workflow_run` webhook notification.
+/// - Claims queued runs using atomic DB Compare-And-Swap by Primary Key (`TryClaimQueuedCiRunAsync(repoId, runId)` where `id = @runId AND status = 'queued'`),
+///   ensuring multiple runner workers never execute the same run twice and avoiding any `id` vs `run_index` multi-row collision.
+/// - Periodically reaps stuck/orphaned runs (`ReconcileStuckCiWorkflowRunsAsync`) left in `running` or `queued` state after a host power outage.
+/// - Inspects the target commit tree in O(1) via `GitEngineService`, records structured step-by-step build/test verification logs,
+///   and dispatches a `workflow_run` webhook notification.
 /// </summary>
 public sealed class CiPipelineRunnerService : BackgroundService
 {
-    public sealed record CiRunTriggerItem(long RepoId, long RunIndex, string Owner, string RepoName, string Branch, string CommitSha, string WorkflowName, string TriggerEvent);
+    public static readonly TimeSpan StuckCiRunThreshold = TimeSpan.FromMinutes(10);
+
+    public sealed record CiRunTriggerItem(
+        long RepoId,
+        long RunId,
+        long RunIndex,
+        string Owner,
+        string RepoName,
+        string Branch,
+        string CommitSha,
+        string WorkflowName,
+        string TriggerEvent);
 
     private readonly GiteaDbRepository _db;
     private readonly GitEngineService _git;
@@ -48,67 +60,43 @@ public sealed class CiPipelineRunnerService : BackgroundService
         });
     }
 
-    /// <summary>
-    /// Creates a `queued` CI workflow run in the database with an atomic per-repository `run_index`
-    /// and enqueues it onto the background runner channel.
-    /// </summary>
     public async Task<CiWorkflowRunEntity> EnqueueCiRunAsync(
         long repoId,
         string workflowName,
         string triggerEvent,
         string branch,
-        string? commitSha,
-        long? triggeredByUserId,
+        string? commitSha = null,
+        long? triggeredByUserId = null,
         CancellationToken ct = default)
     {
         var repo = await _db.GetRepositoryAsync(repoId, ct);
-        string owner = repo?.OwnerUsername ?? "system";
-        string repoName = repo?.Name ?? "repository";
-        long userId = triggeredByUserId ?? repo?.OwnerId ?? 1;
-        string effectiveSha = string.IsNullOrWhiteSpace(commitSha) ? "0000000000000000000000000000000000000000" : commitSha;
+        string owner = repo?.OwnerUsername ?? "gitea-admin";
+        string repoName = repo?.Name ?? "gitea-dotnet-core";
 
-        var run = await _db.CreateCiWorkflowRunAsync(
+        string resolvedSha = commitSha ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(resolvedSha))
+        {
+            try
+            {
+                var commits = await _git.ListCommitsAsync(owner, repoName, branch, 1, ct);
+                resolvedSha = commits.Count > 0 ? commits[0].Sha : "0000000000000000000000000000000000000000";
+            }
+            catch
+            {
+                resolvedSha = "0000000000000000000000000000000000000000";
+            }
+        }
+
+        return await EnqueueWorkflowRunAsync(
             repoId,
-            userId,
+            owner,
+            repoName,
+            triggeredByUserId ?? repo?.OwnerId ?? 1L,
             workflowName,
             triggerEvent,
             branch,
-            effectiveSha,
+            resolvedSha,
             ct);
-
-        _queue.Writer.TryWrite(new CiRunTriggerItem(
-            repoId,
-            run.RunIndex,
-            owner,
-            repoName,
-            branch,
-            effectiveSha,
-            workflowName,
-            triggerEvent));
-
-        return run;
-    }
-
-    public async Task<bool> ExecutePipelineNowAsync(long repoId, long runIdOrIndex, CancellationToken ct = default)
-    {
-        var run = await _db.GetCiWorkflowRunByIdOrIndexAsync(repoId, runIdOrIndex, ct);
-        if (run is null) return false;
-
-        var repo = await _db.GetRepositoryAsync(repoId, ct);
-        string owner = repo?.OwnerUsername ?? "system";
-        string repoName = repo?.Name ?? "repository";
-
-        var item = new CiRunTriggerItem(
-            repoId,
-            run.RunIndex,
-            owner,
-            repoName,
-            run.Branch,
-            run.CommitSha,
-            run.WorkflowName,
-            run.TriggerEvent);
-
-        return await ExecuteSingleWorkflowRunAsync(item, ct);
     }
 
     public async Task<CiWorkflowRunEntity> EnqueueWorkflowRunAsync(
@@ -133,6 +121,7 @@ public sealed class CiPipelineRunnerService : BackgroundService
 
         _queue.Writer.TryWrite(new CiRunTriggerItem(
             repoId,
+            run.Id,
             run.RunIndex,
             owner,
             repoName,
@@ -144,29 +133,87 @@ public sealed class CiPipelineRunnerService : BackgroundService
         return run;
     }
 
+    public async Task<int> ReconcileStuckCiWorkflowRunsAsync(TimeSpan threshold, CancellationToken ct = default)
+    {
+        int reaped = await _db.ReapStuckCiWorkflowRunsAsync(threshold, ct);
+        if (reaped > 0)
+        {
+            _logger.LogWarning("Reaped {Count} orphaned/stuck CI/CD workflow run(s) exceeding threshold {Threshold}.", reaped, threshold);
+        }
+        return reaped;
+    }
+
+    public async Task<bool> ExecutePipelineNowAsync(long repoId, long runId, CancellationToken ct = default)
+    {
+        var run = await _db.GetCiWorkflowRunByIdAsync(repoId, runId, ct)
+                  ?? await _db.GetCiWorkflowRunAsync(repoId, runId, ct);
+        if (run is null)
+            return false;
+
+        var repo = await _db.GetRepositoryAsync(repoId, ct);
+        string owner = repo?.OwnerUsername ?? "gitea-admin";
+        string repoName = repo?.Name ?? "gitea-dotnet-core";
+
+        return await ExecuteSingleWorkflowRunAsync(
+            new CiRunTriggerItem(
+                repoId,
+                run.Id,
+                run.RunIndex,
+                owner,
+                repoName,
+                run.Branch,
+                run.CommitSha,
+                run.WorkflowName,
+                run.TriggerEvent),
+            ct);
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await foreach (var item in _queue.Reader.ReadAllAsync(stoppingToken))
+        using var reaperCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        var reaperTask = RunPeriodicReaperLoopAsync(reaperCts.Token);
+
+        try
+        {
+            await foreach (var item in _queue.Reader.ReadAllAsync(stoppingToken))
+            {
+                try
+                {
+                    await ExecuteSingleWorkflowRunAsync(item, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Unhandled error executing CI workflow run #{RunIndex} for repo {RepoId}", item.RunIndex, item.RepoId);
+                }
+            }
+        }
+        finally
+        {
+            await reaperCts.CancelAsync();
+            try { await reaperTask; } catch { }
+        }
+    }
+
+    private async Task RunPeriodicReaperLoopAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(60));
+        while (await timer.WaitForNextTickAsync(stoppingToken))
         {
             try
             {
-                await ExecuteSingleWorkflowRunAsync(item, stoppingToken);
+                await ReconcileStuckCiWorkflowRunsAsync(StuckCiRunThreshold, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogWarning(ex, "Unhandled error executing CI workflow run #{RunIndex} for repo {RepoId}", item.RunIndex, item.RepoId);
+                _logger.LogWarning(ex, "Error in periodic CI/CD stuck-run reaper loop.");
             }
         }
     }
 
     public async Task<bool> ExecuteSingleWorkflowRunAsync(CiRunTriggerItem item, CancellationToken ct = default)
     {
-        var current = await _db.GetCiWorkflowRunAsync(item.RepoId, item.RunIndex, ct);
-        if (current is null || current.Status != "queued")
-            return false;
-
-        // Atomic CAS transition from 'queued' -> 'running' (prevents duplicate execution under concurrent workers)
-        bool claimed = await _db.TryClaimQueuedCiRunAsync(item.RepoId, item.RunIndex, current.RowVersion, ct);
+        // Atomic CAS transition from 'queued' -> 'running' strictly by Primary Key `item.RunId`
+        bool claimed = await _db.TryClaimQueuedCiRunAsync(item.RepoId, item.RunId, ct);
         if (!claimed)
             return false;
 
@@ -201,14 +248,13 @@ public sealed class CiPipelineRunnerService : BackgroundService
         }
         catch (Exception ex)
         {
-            finalStatus = "failure";
+            finalStatus = "failed";
             logBuilder.AppendLine($"  • [ERROR] : Pipeline step failed: {ex.Message}");
         }
         finally
         {
             sw.Stop();
-            logBuilder.AppendLine($"Pipeline finished with status: {finalStatus.ToUpperInvariant()}");
-            logBuilder.AppendLine($"[Per's Git Actions Runner] Completed with status '{finalStatus.ToUpperInvariant()}' in {sw.Elapsed.TotalMilliseconds:F1} ms.");
+            logBuilder.AppendLine($"Pipeline finished with status: {finalStatus.ToUpperInvariant()} ({sw.Elapsed.TotalMilliseconds:F1} ms).");
         }
 
         await _db.CompleteCiWorkflowRunAsync(
@@ -222,6 +268,7 @@ public sealed class CiPipelineRunnerService : BackgroundService
         _webhooks.EnqueueEvent(item.RepoId, "workflow_run", new
         {
             action = "completed",
+            runId = item.RunId,
             runIndex = item.RunIndex,
             workflowName = item.WorkflowName,
             branch = item.Branch,

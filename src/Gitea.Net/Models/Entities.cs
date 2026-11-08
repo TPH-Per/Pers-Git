@@ -156,8 +156,9 @@ public sealed class CiWorkflowRunEntity
     public long RunIndex { get; set; } // Atomic per-repository CI run sequence (#1, #2, ...)
     public long TriggeredByUserId { get; set; }
     public string TriggeredByUsername { get; set; } = string.Empty;
-    public string WorkflowName { get; set; } = "Per's Git CI/CD Pipeline";
+    public string WorkflowName { get; set; } = "Per's Git Production CI/CD Pipeline";
     public string TriggerEvent { get; set; } = "push"; // "push" | "pull_request" | "workflow_dispatch"
+    public string EventType => TriggerEvent;
     public string Branch { get; set; } = "main";
     public string CommitSha { get; set; } = string.Empty;
     public string Status { get; set; } = "queued"; // "queued" | "running" | "success" | "failure"

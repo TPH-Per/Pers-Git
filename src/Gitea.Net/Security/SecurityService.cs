@@ -35,6 +35,14 @@ public sealed partial class SecurityService
     [GeneratedRegex(@"\A[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}\z", RegexOptions.Compiled)]
     private static partial Regex EmailRegex();
 
+    [GeneratedRegex(@"\A[a-zA-Z0-9][a-zA-Z0-9 _\-\.\(\)\'\/]{1,119}\z", RegexOptions.Compiled)]
+    private static partial Regex SafeWorkflowNameRegex();
+
+    [GeneratedRegex(@"\A[a-zA-Z_][a-zA-Z0-9_\-]{0,63}\z", RegexOptions.Compiled)]
+    private static partial Regex SafeDispatchInputKeyRegex();
+
+    private static readonly char[] ForbiddenShellChars = [';', '|', '&', '$', '>', '<', '`', '\\', '\0', '\r', '\n'];
+
     private static readonly HashSet<string> WindowsReservedNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "CON", "PRN", "AUX", "NUL",
@@ -97,6 +105,68 @@ public sealed partial class SecurityService
     {
         if (string.IsNullOrWhiteSpace(email) || email.Length > 160) return false;
         return EmailRegex().IsMatch(email);
+    }
+
+    /// <summary>
+    /// Strict schema validator for `workflow_dispatch` requests (QA Review Council Member #1 — Security Auditor).
+    /// Blocks command-injection metacharacters, path traversal, invalid Git refs, and oversized input maps.
+    /// </summary>
+    public static bool ValidateWorkflowDispatchRequest(
+        TriggerCiWorkflowRequest? req,
+        string defaultBranch,
+        out string normalizedWorkflowName,
+        out string normalizedBranch,
+        out string error)
+    {
+        normalizedWorkflowName = string.IsNullOrWhiteSpace(req?.WorkflowName)
+            ? "Per's Git Production CI/CD Pipeline"
+            : req.WorkflowName.Trim();
+        normalizedBranch = string.IsNullOrWhiteSpace(req?.Branch)
+            ? defaultBranch
+            : req.Branch.Trim();
+        error = string.Empty;
+
+        if (!IsSafeGitRefName(normalizedBranch))
+        {
+            error = "Invalid branch reference format for workflow_dispatch.";
+            return false;
+        }
+
+        if (normalizedWorkflowName.Length is < 2 or > 120 ||
+            normalizedWorkflowName.IndexOfAny(ForbiddenShellChars) >= 0 ||
+            normalizedWorkflowName.Contains("..", StringComparison.Ordinal) ||
+            !SafeWorkflowNameRegex().IsMatch(normalizedWorkflowName))
+        {
+            error = "Invalid WorkflowName: must be 2-120 safe characters without shell metacharacters or path traversal.";
+            return false;
+        }
+
+        if (req?.Inputs is not null)
+        {
+            if (req.Inputs.Count > 10)
+            {
+                error = "workflow_dispatch Inputs cannot exceed 10 parameters.";
+                return false;
+            }
+
+            foreach (var (k, v) in req.Inputs)
+            {
+                if (string.IsNullOrWhiteSpace(k) || !SafeDispatchInputKeyRegex().IsMatch(k))
+                {
+                    error = $"Invalid workflow_dispatch input key '{k}'.";
+                    return false;
+                }
+
+                string val = v ?? string.Empty;
+                if (val.Length > 256 || val.IndexOfAny(ForbiddenShellChars) >= 0)
+                {
+                    error = $"Invalid workflow_dispatch input value for '{k}': shell metacharacters and control characters are forbidden.";
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     /// <summary>

@@ -186,6 +186,7 @@ using (var scope = app.Services.CreateScope())
     await git.EnsureMinimumGitVersionAsync();
     await db.InitializeSchemaAsync();
     await reconciler.ReconcileStuckPullRequestsAsync(MergeReconcilerHostedService.StuckMergeThreshold);
+    await ciRunner.ReconcileStuckCiWorkflowRunsAsync(CiPipelineRunnerService.StuckCiRunThreshold);
 
     var existingAdmin = await db.GetUserByUsernameAsync("gitea-admin");
     if (existingAdmin is null)
@@ -438,7 +439,8 @@ app.MapGet("/api/v1/audit-logs", async (HttpContext ctx, int? page, int? pageSiz
     return Results.Ok(logs);
 }).RequireAuthorization("AdminOnly");
 
-app.MapPost("/api/v1/admin/reconcile", async (HttpContext ctx, GiteaDbRepository db, MergeReconcilerHostedService reconciler, CancellationToken ct) =>
+app.MapPost("/api/v1/admin/reconcile", async (
+    HttpContext ctx, GiteaDbRepository db, MergeReconcilerHostedService reconciler, CiPipelineRunnerService ciRunner, CancellationToken ct) =>
 {
     var actor = await GetAuthenticatedUserAsync(ctx, db);
     if (actor is null) return Results.Unauthorized();
@@ -447,7 +449,8 @@ app.MapPost("/api/v1/admin/reconcile", async (HttpContext ctx, GiteaDbRepository
 
     await db.ReconcileMaintainedCountersAsync(null, ct);
     await reconciler.ReconcileStuckPullRequestsAsync(TimeSpan.Zero, ct);
-    return Results.Ok(new { status = "reconciled" });
+    int reapedCiRuns = await ciRunner.ReconcileStuckCiWorkflowRunsAsync(TimeSpan.Zero, ct);
+    return Results.Ok(new { status = "reconciled", reapedCiRuns });
 }).RequireAuthorization("AdminOnly");
 
 app.MapPost("/api/v1/admin/backup", async (HttpContext ctx, IHostEnvironment env, GiteaDbRepository db, CancellationToken ct) =>
@@ -463,8 +466,17 @@ app.MapPost("/api/v1/admin/backup", async (HttpContext ctx, IHostEnvironment env
     return Results.Ok(new { status = "backed_up", fileName = Path.GetFileName(backupFile), createdAt = DateTimeOffset.UtcNow });
 }).RequireAuthorization("AdminOnly");
 
-app.MapGet("/metrics", async (GiteaDbRepository db, KeyedLockProvider locks, CancellationToken ct) =>
+app.MapGet("/metrics", async (HttpContext ctx, GiteaDbRepository db, KeyedLockProvider locks, CancellationToken ct) =>
 {
+    var remoteIp = ctx.Connection.RemoteIpAddress;
+    bool isLoopback = remoteIp is null || System.Net.IPAddress.IsLoopback(remoteIp);
+    if (!isLoopback)
+    {
+        var actor = await GetAuthenticatedUserAsync(ctx, db);
+        if (actor is null || !actor.IsAdmin)
+            return Results.StatusCode(StatusCodes.Status403Forbidden);
+    }
+
     bool healthy = await db.CheckHealthAsync(ct);
     string metricsText = string.Join("\n",
         "# HELP pers_git_up Whether Per's Git server and database are healthy (1 = up, 0 = down).",
@@ -1199,17 +1211,22 @@ app.MapPost("/api/v1/repos/{owner}/{repo}/actions/runs", async (
     if (err is not null) return err;
     if (!canWrite) return Results.StatusCode(StatusCodes.Status403Forbidden);
 
-    string branch = string.IsNullOrWhiteSpace(req?.Branch) ? entity!.DefaultBranch : req.Branch.Trim();
-    if (!GitEngineService.ValidateRefFormat(branch))
-        return Results.BadRequest(new { error = "Invalid branch name." });
+    if (!SecurityService.ValidateWorkflowDispatchRequest(
+            req,
+            entity!.DefaultBranch,
+            out string workflowName,
+            out string branch,
+            out string validationError))
+    {
+        return Results.BadRequest(new { error = validationError });
+    }
 
-    string workflowName = string.IsNullOrWhiteSpace(req?.WorkflowName)
-        ? "Per's Git Production CI/CD Pipeline"
-        : req.WorkflowName.Trim();
-    if (workflowName.Length > 140)
-        return Results.BadRequest(new { error = "Workflow name cannot exceed 140 characters." });
+    if (!await git.BranchExistsAsync(entity.OwnerUsername, entity.Name, branch, ct))
+    {
+        return Results.BadRequest(new { error = $"Target branch '{branch}' does not exist in repository." });
+    }
 
-    var commits = await git.ListCommitsAsync(entity!.OwnerUsername, entity.Name, branch, 1, ct);
+    var commits = await git.ListCommitsAsync(entity.OwnerUsername, entity.Name, branch, 1, ct);
     string headSha = commits.Count > 0 ? commits[0].Sha : "0000000000000000000000000000000000000000";
 
     var queuedRun = await db.CreateCiWorkflowRunAsync(entity.Id, workflowName, "workflow_dispatch", branch, headSha, actor.Id, ct);

@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
-Package & Reference Integrity Auditor (`tools/verify_package_integrity.py`).
+Package, Namespace & Static Method Call Integrity Auditor (`tools/verify_package_integrity.py`).
 Acceptance Rule #1 Enforcement:
 1. Scans every `.cs` file in `Gitea.Net` for `namespace Gitea.Net...` declarations and `using Gitea.Net...` imports,
    verifying that every internal namespace imported has at least one defining `.cs` file in the repository.
 2. Scans all core type references (`SecurityService`, `KeyedLockProvider`, `GiteaAuthHandler`, `GiteaDbRepository`,
    `SqlQueryCounter`, `GitEngineService`, `WebhookDeliveryService`, `MergeReconcilerHostedService`,
    `CiPipelineRunnerService`, `ProductionReadinessTests`) and verifies their class definitions exist.
-3. Verifies `.github/workflows/ci-cd.yml` and `.gitea/workflows/ci-cd.yml` exist and contain the full
+3. Cross-checks method calls on internal services (`db`, `_db`, `git`, `_git`, `sec`, `security`, `webhooks`, `_webhooks`,
+   `reconciler`, `ciRunner`, `host.Db`, `host.Git`, `host.Security`, `host.Reconciler`, `host.CiRunner`, `SecurityService`,
+   `GitEngineService`, `WebhookDeliveryService`) against declared C# method names so no missing method can slip through.
+4. Verifies `.github/workflows/ci-cd.yml` and `.gitea/workflows/ci-cd.yml` exist and contain the full
    CI/CD pipeline (`jobs:`, `postgres:16-alpine`, `verify_all.sh`).
-4. Scans `README.md` for referenced relative paths (`verify_all.sh`, `tools/csharp_lexer_check.py`,
+5. Scans `README.md` for referenced relative paths (`verify_all.sh`, `tools/csharp_lexer_check.py`,
    `tools/verify_package_integrity.py`, `tools/python_reference_harness.py`) and verifies every referenced file exists.
-5. When passed `--zip <path_to_zip>`, verifies that the `.zip` archive contains all 37 required files and that no file is 0 bytes.
+6. When passed `--zip <path_to_zip>`, verifies that the `.zip` archive contains all 37 required files and that no file is 0 bytes.
 """
 import os
 import re
@@ -97,6 +100,7 @@ def audit_directory(root_dir: str) -> list[str]:
     declared_namespaces = set()
     imported_namespaces = set()
     all_cs_content = []
+    declared_methods = set()
 
     for r, _, files in os.walk(root_dir):
         for f in sorted(files):
@@ -109,6 +113,8 @@ def audit_directory(root_dir: str) -> list[str]:
                     declared_namespaces.add(m.group(1))
                 for m in re.finditer(r"^\s*using\s+(Gitea\.Net(?:\.[A-Za-z0-9_]+)*)\s*;", text, re.MULTILINE):
                     imported_namespaces.add(m.group(1))
+                for m in re.finditer(r"\b(?:public|private|protected|internal)\s+(?:static\s+)?(?:async\s+)?[A-Za-z0-9_<>,\?\(\)\s\[\]]+\s+([A-Za-z0-9_]+)\s*\(", text):
+                    declared_methods.add(m.group(1))
 
     missing_ns = imported_namespaces - declared_namespaces
     if missing_ns:
@@ -119,7 +125,16 @@ def audit_directory(root_dir: str) -> list[str]:
         if req_type not in combined_cs:
             errors.append(f"Missing required C# class definition: '{req_type}'")
 
-    # 4. Verify paths mentioned in README.md exist
+    # 4. Cross-check all method calls on internal service instances against declared methods
+    service_Targets = r"(?:db|_db|git|_git|sec|security|webhooks|_webhooks|reconciler|ciRunner|host\.Db|host\.Git|host\.Security|host\.Reconciler|host\.CiRunner|SecurityService|GitEngineService|WebhookDeliveryService|SqlQueryCounter)"
+    for m in re.finditer(rf"\b({service_Targets})\.([A-Za-z0-9_]+)\s*\(", combined_cs):
+        target_expr, method_name = m.group(1), m.group(2)
+        if method_name in ("Dispose", "ToString", "Equals", "GetHashCode", "GetType"):
+            continue
+        if method_name not in declared_methods:
+            errors.append(f"Unresolved internal C# method call: {target_expr}.{method_name}(...) is not declared in any .cs file")
+
+    # 5. Verify paths mentioned in README.md exist
     readme_path = os.path.join(root_dir, "README.md")
     if os.path.isfile(readme_path):
         with open(readme_path, "r", encoding="utf-8") as rf:
@@ -168,7 +183,7 @@ def main():
             print("  -", e)
         sys.exit(1)
 
-    print(f"  [PASS] Package & Namespace Integrity Audit: All {len(REQUIRED_FILES)} required files and {len(REQUIRED_TYPES)} core C# types verified.")
+    print(f"  [PASS] Package, Namespace & Method Call Integrity Audit: All {len(REQUIRED_FILES)} required files, {len(REQUIRED_TYPES)} core C# types, and all internal service calls verified.")
     if zip_path:
         print(f"  [PASS] ZIP Archive Integrity Audit: {zip_path} contains all {len(REQUIRED_FILES)} required files (0 missing, 0 empty).")
 

@@ -1,6 +1,6 @@
 ================================================================================
-PYTHON/SQLITE/GIT-CLI REFERENCE HARNESS (2026-11-08T13:36:25.526027+00:00)
-Git CLI: git version 2.39.5 | SQLite: 3.40.1
+PYTHON/SQLITE/GIT-CLI REFERENCE HARNESS (2026-11-08T15:43:36.369193+00:00)
+Git CLI: git version 2.52.0.windows.1 | SQLite: 3.49.1
 ================================================================================
   [PASS] Private Repo Anti-Enumeration: Anonymous=404 (404), Owner=200 (200)
   [PASS] PAT Scope Enforcement: Read-Only PAT rejected on POST /issues with HTTP 403
@@ -8,4 +8,10 @@ Git CLI: git version 2.39.5 | SQLite: 3.40.1
   [PASS] Git Smart HTTP Push of >30MB (32 MB random binary packfile) succeeded with Write PAT.
   [PASS] 60-Thread Concurrent Issue Creation (Bearer PAT): Generated unique sequential indices #3..#62.
   [PASS] 50-Thread Concurrent PR Merge (Bearer PAT): 1 winner (HTTP 200) and 49 conflicts (HTTP 409).
-  [PASS] Latency Percentiles across 310 samples: p50=288ms, p95=395ms, p99=404ms (0.0% Error Rate)
+  [PASS] 50-Thread Concurrent CI/CD Workflow Run Creation: Generated unique sequential RunIndex #1..#50.
+  [PASS] 50-Thread Concurrent CI/CD Worker CAS Claim (`WHERE status='queued'`): 1 winner (HTTP 200) and 49 rejections (HTTP 409).
+  [PASS] CI/CD Actions List Zero N+1 Verification: Fetched 50 runs with user metadata in exactly 2 SQL queries (1 COUNT + 1 SELECT JOIN).
+  [PASS] QA Council Security Gate: workflow_dispatch shell metacharacters & malicious inputs rejected (HTTP 400).
+  [PASS] QA Council Reaper Gate: Reaped 50 stuck/orphaned CI runs to 'failed' and verified idempotency (second pass=0).
+  [PASS] Parameterized SQLi Defense: 9 SQL injection vectors safely neutralized (HTTP 200, 0 schema damage).
+  [PASS] Latency Percentiles across 410 samples: p50=90ms, p95=181ms, p99=195ms (0.0% Error Rate)

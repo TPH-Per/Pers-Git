@@ -150,5 +150,6 @@ public sealed record IssueDetailBundleDto(
     IReadOnlyList<IssueCommentEntity> Comments);
 
 public sealed record TriggerCiWorkflowRequest(
-    string? WorkflowName = "Per's Git CI/CD Pipeline",
-    string? Branch = "main");
+    string? WorkflowName = "Per's Git Production CI/CD Pipeline",
+    string? Branch = "main",
+    IReadOnlyDictionary<string, string>? Inputs = null);

