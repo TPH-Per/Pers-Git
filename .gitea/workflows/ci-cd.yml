@@ -38,7 +38,7 @@ jobs:
 
       - name: Execute Unified Verification Pipeline (verify_all.sh)
         env:
-          GITEA_POSTGRES_CONN: "Host=127.0.0.1;Port=5432;Database=gitea_net_ci;Username=gitea_ci;Password=gitea_ci_password_2026;Pooling=true;Maximum Pool Size=25;Connection Idle Lifetime=1;"
+          GITEA_POSTGRES_CONN: "Host=127.0.0.1;Port=5432;Database=gitea_net_ci;Username=gitea_ci;Password=gitea_ci_password_2026;Pooling=true;Maximum Pool Size=25;"
         run: |
           chmod +x verify_all.sh scripts/sqlite_hot_backup.sh
           ./verify_all.sh

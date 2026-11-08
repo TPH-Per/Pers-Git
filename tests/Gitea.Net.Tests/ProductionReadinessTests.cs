@@ -61,7 +61,6 @@ public sealed class IsolatedGiteaHost : IDisposable
             {
                 SearchPath = $"{_schemaName},public",
                 MaxPoolSize = 25,
-                ConnectionIdleLifetime = 1,
                 Timeout = 30
             };
             pgConn = csb.ConnectionString;
