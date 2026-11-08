@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 140" width="100%" height="100%" role="img" aria-labelledby="persGitLogoTitle persGitLogoDesc">
+  <title id="persGitLogoTitle">Per's Git — Self-Hosted Git Server</title>
+  <desc id="persGitLogoDesc">Editorial emblem combining a stylized monogram P and an atomic Git branch-and-merge directed acyclic graph in warm terracotta clay (#C96442) and charcoal ink (#141413) on warm ivory parchment (#FAF9F6).</desc>
+  <defs>
+    <linearGradient id="terracottaGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#D97757" />
+      <stop offset="100%" stop-color="#B85030" />
+    </linearGradient>
+    <filter id="editorialShadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#141413" flood-opacity="0.08" />
+    </filter>
+  </defs>
+
+  <!-- Emblem Badge Container (Squircle in Warm Alabaster with 1.5px Sandstone Border) -->
+  <g transform="translate(14, 14)" filter="url(#editorialShadow)">
+    <rect x="0" y="0" width="112" height="112" rx="26" fill="#FAF9F6" stroke="#D5D0C5" stroke-width="1.75" />
+    <rect x="6" y="6" width="100" height="100" rx="21" fill="none" stroke="#EAE6DD" stroke-width="1" />
+
+    <!-- Subtle Editorial Grid Lines inside Emblem -->
+    <line x1="34" y1="14" x2="34" y2="98" stroke="#EFECE6" stroke-width="1" stroke-dasharray="2 3" />
+    <line x1="76" y1="14" x2="76" y2="98" stroke="#EFECE6" stroke-width="1" stroke-dasharray="2 3" />
+
+    <!-- Feature Branch Loop forming the bowl of the letter 'P' (Terracotta Clay) -->
+    <path d="M 34 30 C 66 30, 84 32, 84 51 C 84 70, 66 72, 34 72"
+          fill="none"
+          stroke="url(#terracottaGrad)"
+          stroke-width="6.5"
+          stroke-linecap="round"
+          stroke-linejoin="round" />
+
+    <!-- Secondary Atomic Merge Arc (Forest Sage Accent) -->
+    <path d="M 58 32 C 58 46, 76 42, 76 51"
+          fill="none"
+          stroke="#2E6F4E"
+          stroke-width="3.2"
+          stroke-linecap="round"
+          stroke-dasharray="4 4"
+          opacity="0.85" />
+
+    <!-- Main Trunk Line forming the stem of the letter 'P' (Near-Black Slate Ink #141413) -->
+    <line x1="34" y1="90" x2="34" y2="24"
+          stroke="#141413"
+          stroke-width="7"
+          stroke-linecap="round" />
+
+    <!-- Git Commit Nodes (Hollow Warm Ivory Centers) -->
+    <!-- Root Commit Node (Bottom Stem) -->
+    <circle cx="34" cy="88" r="6.5" fill="#FAF9F6" stroke="#141413" stroke-width="4" />
+    <!-- Merge Target Commit Node (Middle Stem) -->
+    <circle cx="34" cy="72" r="5.5" fill="#FAF9F6" stroke="#141413" stroke-width="3.5" />
+    <!-- Branch Origin Node (Top Stem) -->
+    <circle cx="34" cy="30" r="6.5" fill="#FAF9F6" stroke="#141413" stroke-width="4" />
+    <!-- Feature Head Commit Node (Apex of the P Bowl in Terracotta) -->
+    <circle cx="84" cy="51" r="7.5" fill="#FAF9F6" stroke="url(#terracottaGrad)" stroke-width="4.5" />
+    <circle cx="84" cy="51" r="2.5" fill="#C96442" />
+  </g>
+
+  <!-- Editorial Wordmark & Technical Subtitle -->
+  <g transform="translate(148, 0)">
+    <!-- "Per's Git" in High-Contrast Editorial Serif -->
+    <text x="0" y="72"
+          font-family="'Newsreader', 'Tiempos Text', 'Iowan Old Style', 'Charter', 'Palatino Linotype', Georgia, serif"
+          font-size="48"
+          font-weight="600"
+          letter-spacing="-0.025em"
+          fill="#141413">Per&#8217;s <tspan fill="#C96442" font-style="italic" font-weight="600">Git</tspan></text>
+
+    <!-- Technical Metadata Pill & Subtitle -->
+    <rect x="2" y="88" width="108" height="24" rx="6" fill="#EFECE6" stroke="#D5D0C5" stroke-width="1" />
+    <circle cx="14" cy="100" r="3.5" fill="#2E6F4E" />
+    <text x="24" y="104"
+          font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="11"
+          font-weight="600"
+          letter-spacing="0.08em"
+          fill="#3D3B37">GIT SERVER</text>
+
+    <text x="122" y="104"
+          font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="13"
+          font-weight="500"
+          fill="#6E6B64">Self-Hosted .NET 8.0 Engine</text>
+  </g>
+</svg>

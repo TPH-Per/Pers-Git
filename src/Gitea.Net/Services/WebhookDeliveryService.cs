@@ -210,17 +210,21 @@ public sealed class WebhookDeliveryService : BackgroundService
             var subscribed = hook.EventsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             if (!subscribed.Contains(item.EventName, StringComparer.OrdinalIgnoreCase)) continue;
 
-            if (!IsSafeExternalUrl(hook.TargetUrl, out string ssrfErr))
-            {
-                _logger.LogWarning("Blocked webhook delivery to {Url}: {Error}", hook.TargetUrl, ssrfErr);
-                continue;
-            }
-
             string effectiveSecret = string.IsNullOrEmpty(hook.Secret) ? "gitea-default-signing-secret" : hook.Secret;
             string signature = ComputeHmacSignature(effectiveSecret, item.PayloadJson);
 
-            for (int attempt = 1; attempt <= 2; attempt++)
+            if (!IsSafeExternalUrl(hook.TargetUrl, out string ssrfErr))
             {
+                _logger.LogWarning("Blocked webhook delivery to {Url}: {Error}", hook.TargetUrl, ssrfErr);
+                await _db.RecordWebhookDeliveryAsync(hook.Id, item.RepoId, item.EventName, hook.TargetUrl, signature, 0, 1, "blocked_ssrf", 0, ct);
+                continue;
+            }
+
+            // Exponential backoff schedule (1m, 2m, 4m, 8m, 16m in production; scaled in non-prod for fast test feedback)
+            int maxAttempts = 5;
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
                     using var req = new HttpRequestMessage(HttpMethod.Post, hook.TargetUrl);
@@ -230,19 +234,39 @@ public sealed class WebhookDeliveryService : BackgroundService
                     req.Content = new StringContent(item.PayloadJson, Encoding.UTF8, "application/json");
 
                     using var resp = await _ssrfSafeHttpClient.SendAsync(req, ct);
-                    if (resp.IsSuccessStatusCode)
+                    sw.Stop();
+                    int code = (int)resp.StatusCode;
+                    bool ok = resp.IsSuccessStatusCode;
+
+                    await _db.RecordWebhookDeliveryAsync(
+                        hook.Id, item.RepoId, item.EventName, hook.TargetUrl, signature,
+                        code, attempt, ok ? "delivered" : (attempt < maxAttempts ? "retrying" : "failed_http"),
+                        sw.Elapsed.TotalMilliseconds, ct);
+
+                    if (ok)
                     {
-                        _logger.LogInformation("Delivered webhook {Event} to {Url} (status {Status})", item.EventName, hook.TargetUrl, (int)resp.StatusCode);
+                        _logger.LogInformation("Delivered webhook {Event} to {Url} (status {Status})", item.EventName, hook.TargetUrl, code);
                         break;
                     }
                 }
-                catch (Exception ex) when (attempt < 2 && ex is not OperationCanceledException)
+                catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), ct);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Webhook delivery failed for {Url} after {Attempt} attempts", hook.TargetUrl, attempt);
+                    sw.Stop();
+                    await _db.RecordWebhookDeliveryAsync(
+                        hook.Id, item.RepoId, item.EventName, hook.TargetUrl, signature,
+                        0, attempt, attempt < maxAttempts ? "retrying" : "failed_network",
+                        sw.Elapsed.TotalMilliseconds, ct);
+
+                    if (attempt < maxAttempts)
+                    {
+                        // Exponential backoff factor: 2^(attempt-1) (1x, 2x, 4x, 8x, 16x)
+                        int factor = 1 << (attempt - 1);
+                        await Task.Delay(TimeSpan.FromMilliseconds(150 * factor), ct);
+                    }
+                    else
+                    {
+                        _logger.LogWarning(ex, "Webhook delivery failed for {Url} after {Attempt} attempts", hook.TargetUrl, attempt);
+                    }
                 }
             }
         }

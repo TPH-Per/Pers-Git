@@ -148,3 +148,7 @@ public sealed record GitDiffDto(
 public sealed record IssueDetailBundleDto(
     IssueEntity Issue,
     IReadOnlyList<IssueCommentEntity> Comments);
+
+public sealed record TriggerCiWorkflowRequest(
+    string? WorkflowName = "Per's Git CI/CD Pipeline",
+    string? Branch = "main");

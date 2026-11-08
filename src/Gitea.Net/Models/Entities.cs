@@ -133,3 +133,37 @@ public sealed class AuditLogEntity
     public string Summary { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
 }
+
+public sealed class WebhookDeliveryEntity
+{
+    public long Id { get; set; }
+    public long WebhookId { get; set; }
+    public long RepoId { get; set; }
+    public string EventName { get; set; } = string.Empty;
+    public string TargetUrl { get; set; } = string.Empty;
+    public string SignatureHeader { get; set; } = string.Empty;
+    public int StatusCode { get; set; }
+    public int AttemptCount { get; set; }
+    public string Status { get; set; } = "delivered"; // "delivered" | "retrying" | "failed_ssrf" | "failed_http"
+    public double DurationMs { get; set; }
+    public DateTimeOffset DeliveredAt { get; set; }
+}
+
+public sealed class CiWorkflowRunEntity
+{
+    public long Id { get; set; }
+    public long RepoId { get; set; }
+    public long RunIndex { get; set; } // Atomic per-repository CI run sequence (#1, #2, ...)
+    public long TriggeredByUserId { get; set; }
+    public string TriggeredByUsername { get; set; } = string.Empty;
+    public string WorkflowName { get; set; } = "Per's Git CI/CD Pipeline";
+    public string TriggerEvent { get; set; } = "push"; // "push" | "pull_request" | "workflow_dispatch"
+    public string Branch { get; set; } = "main";
+    public string CommitSha { get; set; } = string.Empty;
+    public string Status { get; set; } = "queued"; // "queued" | "running" | "success" | "failure"
+    public string LogsText { get; set; } = string.Empty;
+    public double DurationMs { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? CompletedAt { get; set; }
+    public long RowVersion { get; set; }
+}

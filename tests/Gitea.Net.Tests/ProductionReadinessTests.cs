@@ -29,6 +29,7 @@ public sealed class IsolatedGiteaHost : IDisposable
     public GitEngineService Git { get; }
     public SecurityService Security { get; }
     public MergeReconcilerHostedService Reconciler { get; }
+    public CiPipelineRunnerService CiRunner { get; }
 
     public IsolatedGiteaHost()
     {
@@ -60,6 +61,7 @@ public sealed class IsolatedGiteaHost : IDisposable
         Git = Factory.Services.GetRequiredService<GitEngineService>();
         Security = Factory.Services.GetRequiredService<SecurityService>();
         Reconciler = Factory.Services.GetRequiredService<MergeReconcilerHostedService>();
+        CiRunner = Factory.Services.GetRequiredService<CiPipelineRunnerService>();
     }
 
     public HttpClient CreateBasicClient(string username, string passwordOrPat)
@@ -404,5 +406,65 @@ public sealed class ProductionReadinessTests
         Assert.False(SecurityService.IsSafeIdentifier("repo.git"));
         Assert.False(SecurityService.IsSafeIdentifier("CON"));
         Assert.False(SecurityService.IsSafeIdentifier("admin\n"));
+    }
+
+    // ==================== 9. P0-CI/CD ACTIONS PIPELINE ZERO N+1 & 50-THREAD CONCURRENT CAS CLAIM RACE TEST ====================
+
+    [Fact]
+    public async Task Regression_P0_CiCdPipeline_ZeroNPlusOne_And_50ConcurrentRunCreationAndCasClaimRace()
+    {
+        using var host = new IsolatedGiteaHost();
+        var admin = (await host.Db.GetUserByUsernameAsync("gitea-admin"))!;
+        var repo = await host.Db.CreateRepositoryAsync(admin.Id, "ci-cd-race-repo", "CI/CD Race & N+1 Test Repo", false, "main");
+        await host.Git.InitializeBareRepositoryAsync("gitea-admin", "ci-cd-race-repo", "main", true, admin.FullName, admin.Email, "CI/CD Race");
+
+        // 1. 50 concurrent CI workflow run creations sharing repo_counters.last_ci_run_index
+        const int runThreads = 50;
+        var createdRuns = new ConcurrentBag<CiWorkflowRunEntity>();
+        await Task.WhenAll(Enumerable.Range(1, runThreads).Select(async i =>
+        {
+            var run = await host.Db.CreateCiWorkflowRunAsync(
+                repo.Id,
+                "Per's Git Production CI/CD Pipeline",
+                "push",
+                "main",
+                $"0123456789abcdef0123456789abcdef0000{i:D4}",
+                admin.Id);
+            createdRuns.Add(run);
+        }));
+
+        var sortedIndices = createdRuns.Select(r => r.RunIndex).OrderBy(x => x).ToList();
+        Assert.Equal(Enumerable.Range(1, runThreads).Select(x => (long)x).ToList(), sortedIndices);
+
+        // 2. 50 concurrent worker threads racing to claim the exact same queued CI run via CAS (`WHERE status = 'queued'`)
+        var targetRun = createdRuns.First(r => r.RunIndex == 1);
+        int claimWinners = 0;
+        int claimLosers = 0;
+        await Task.WhenAll(Enumerable.Range(0, 50).Select(async _ =>
+        {
+            bool claimed = await host.Db.TryClaimQueuedCiRunAsync(repo.Id, targetRun.Id);
+            if (claimed) Interlocked.Increment(ref claimWinners);
+            else Interlocked.Increment(ref claimLosers);
+        }));
+
+        Assert.Equal(1, claimWinners);
+        Assert.Equal(49, claimLosers);
+
+        // 3. Zero N+1 verification: listing all 50 CI workflow runs with trigger user metadata executes in 2 SQL queries (1 COUNT + 1 SELECT JOIN)
+        using (SqlQueryCounter.BeginScope())
+        {
+            var page = await host.Db.ListCiWorkflowRunsAsync(repo.Id, 1, 50);
+            Assert.Equal(50, page.Items.Count);
+            Assert.All(page.Items, item => Assert.Equal("gitea-admin", item.TriggeredByUsername));
+            Assert.Equal(2, SqlQueryCounter.Count);
+        }
+
+        // 4. Execute a full end-to-end CI/CD pipeline run on run #2 and verify completion
+        var secondRun = createdRuns.First(r => r.RunIndex == 2);
+        await host.CiRunner.ExecutePipelineNowAsync(repo.Id, secondRun.Id);
+        var completed = await host.Db.GetCiWorkflowRunAsync(repo.Id, 2);
+        Assert.NotNull(completed);
+        Assert.Equal("success", completed!.Status);
+        Assert.Contains("Pipeline finished with status: SUCCESS", completed.LogsText);
     }
 }

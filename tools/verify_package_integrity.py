@@ -5,11 +5,13 @@ Acceptance Rule #1 Enforcement:
 1. Scans every `.cs` file in `Gitea.Net` for `namespace Gitea.Net...` declarations and `using Gitea.Net...` imports,
    verifying that every internal namespace imported has at least one defining `.cs` file in the repository.
 2. Scans all core type references (`SecurityService`, `KeyedLockProvider`, `GiteaAuthHandler`, `GiteaDbRepository`,
-   `SqlQueryCounter`, `GitEngineService`, `WebhookDeliveryService`, `MergeReconcilerHostedService`, `ProductionReadinessTests`)
-   and verifies their class definitions exist.
-3. Scans `README.md` for referenced relative paths (`verify_all.sh`, `tools/csharp_lexer_check.py`,
+   `SqlQueryCounter`, `GitEngineService`, `WebhookDeliveryService`, `MergeReconcilerHostedService`,
+   `CiPipelineRunnerService`, `ProductionReadinessTests`) and verifies their class definitions exist.
+3. Verifies `.github/workflows/ci-cd.yml` and `.gitea/workflows/ci-cd.yml` exist and contain the full
+   CI/CD pipeline (`jobs:`, `postgres:16-alpine`, `verify_all.sh`).
+4. Scans `README.md` for referenced relative paths (`verify_all.sh`, `tools/csharp_lexer_check.py`,
    `tools/verify_package_integrity.py`, `tools/python_reference_harness.py`) and verifies every referenced file exists.
-4. When passed `--zip <path_to_zip>`, verifies that the `.zip` archive contains all required files and that no file is 0 bytes.
+5. When passed `--zip <path_to_zip>`, verifies that the `.zip` archive contains all 37 required files and that no file is 0 bytes.
 """
 import os
 import re
@@ -17,6 +19,14 @@ import sys
 import zipfile
 
 REQUIRED_FILES = [
+    ".github/workflows/ci-cd.yml",
+    ".gitea/workflows/ci-cd.yml",
+    "Dockerfile",
+    "docker-compose.yml",
+    "Caddyfile",
+    "scripts/sqlite_hot_backup.sh",
+    "src/Gitea.Net/wwwroot/img/pers-git-logo.svg",
+    "src/Gitea.Net/wwwroot/img/favicon.svg",
     "Gitea.Net.sln",
     "LICENSE",
     "README.md",
@@ -32,6 +42,7 @@ REQUIRED_FILES = [
     "src/Gitea.Net/Security/SecurityService.cs",
     "src/Gitea.Net/Services/WebhookDeliveryService.cs",
     "src/Gitea.Net/Services/MergeReconcilerHostedService.cs",
+    "src/Gitea.Net/Services/CiPipelineRunnerService.cs",
     "src/Gitea.Net/wwwroot/index.html",
     "src/Gitea.Net/wwwroot/css/app.css",
     "src/Gitea.Net/wwwroot/js/app.js",
@@ -57,6 +68,7 @@ REQUIRED_TYPES = [
     "class GitEngineService",
     "class WebhookDeliveryService",
     "class MergeReconcilerHostedService",
+    "class CiPipelineRunnerService",
     "class ProductionReadinessTests"
 ]
 
@@ -71,7 +83,17 @@ def audit_directory(root_dir: str) -> list[str]:
         elif os.path.getsize(full) == 0:
             errors.append(f"Empty (0-byte) file in directory tree: {rel}")
 
-    # 2. Collect all declared and imported Gitea.Net.* namespaces across all .cs files
+    # 2. Verify CI/CD workflow YAML definitions contain required jobs and services
+    for wf_rel in (".github/workflows/ci-cd.yml", ".gitea/workflows/ci-cd.yml"):
+        wf_full = os.path.join(root_dir, wf_rel)
+        if os.path.isfile(wf_full):
+            with open(wf_full, "r", encoding="utf-8") as wf:
+                wf_text = wf.read()
+            for required_token in ("jobs:", "postgres:16-alpine", "verify_all.sh"):
+                if required_token not in wf_text:
+                    errors.append(f"{wf_rel} is missing required CI/CD token '{required_token}'")
+
+    # 3. Collect all declared and imported Gitea.Net.* namespaces across all .cs files
     declared_namespaces = set()
     imported_namespaces = set()
     all_cs_content = []
@@ -97,14 +119,13 @@ def audit_directory(root_dir: str) -> list[str]:
         if req_type not in combined_cs:
             errors.append(f"Missing required C# class definition: '{req_type}'")
 
-    # 3. Verify paths mentioned in README.md exist
+    # 4. Verify paths mentioned in README.md exist
     readme_path = os.path.join(root_dir, "README.md")
     if os.path.isfile(readme_path):
         with open(readme_path, "r", encoding="utf-8") as rf:
             readme_text = rf.read()
-        for m in re.finditer(r"`((?:tools|src|tests|artifacts)/[A-Za-z0-9_\-\./]+|verify_all\.sh)`", readme_text):
+        for m in re.finditer(r"`((?:tools|src|tests|artifacts|\.github|\.gitea)/[A-Za-z0-9_\-\./]+|verify_all\.sh)`", readme_text):
             ref_path = m.group(1)
-            # Skip runtime-only log files that require local dotnet SDK if not yet generated
             if ref_path.endswith(".trx") or ref_path.endswith("dotnet_build_release.log"):
                 continue
             if not os.path.exists(os.path.join(root_dir, ref_path)):

@@ -1,12 +1,97 @@
 /**
- * Gitea.Net Production Vanilla ES6 Frontend (100% MIT Licensed, Zero External Libraries)
- * - Uses HttpOnly SameSite=Strict Session Cookies (`credentials: "same-origin"`) + `X-Gitea-Csrf: 1` anti-CSRF header.
- * - Custom Animated Snackbar Queue (`GiteaSnackbar`) & Accessible `<dialog>` Modal Engine (`GiteaDialog`).
- * - Supports Paginated APIs (`PagedResult<T>`), Binary Blob Detection, Scoped PAT Management, Collaborator RBAC, and 3-Phase Atomic PR Merge.
+ * Per's Git (Gitea.Net) — Production Vanilla ES6 Frontend + PersMotion (GSAP-Grade MIT Animation Engine)
+ * - 100% MIT Licensed, Zero External Non-MIT Libraries.
+ * - Includes `PersMotion`: hardware-accelerated Web Animations API (WAAPI) & SVG stroke-dashoffset choreography
+ *   (SVG path draw-in, staggered list cascades, modal spring physics, and animated number counters).
  */
 (() => {
   "use strict";
 
+  // ==========================================================================
+  // 0. PERSMOTION — 100% MIT-LICENSED GSAP-GRADE CHOREOGRAPHY ENGINE
+  // ==========================================================================
+  const PersMotion = {
+    prefersReducedMotion() {
+      return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    },
+
+    animateLogoDraw() {
+      if (this.prefersReducedMotion()) return;
+      const paths = document.querySelectorAll(".svg-draw-path");
+      paths.forEach((p, idx) => {
+        if (typeof p.getTotalLength === "function") {
+          const len = p.getTotalLength();
+          p.style.strokeDasharray = `${len}`;
+          p.style.strokeDashoffset = `${len}`;
+          p.animate(
+            [{ strokeDashoffset: len }, { strokeDashoffset: 0 }],
+            {
+              duration: 750,
+              delay: idx * 140,
+              easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+              fill: "forwards"
+            }
+          );
+        }
+      });
+
+      const nodes = document.querySelectorAll(".svg-pulse-node");
+      nodes.forEach((node, idx) => {
+        node.animate(
+          [
+            { transform: "scale(0.3)", opacity: 0, transformOrigin: "center" },
+            { transform: "scale(1.15)", opacity: 1, transformOrigin: "center" },
+            { transform: "scale(1)", opacity: 1, transformOrigin: "center" }
+          ],
+          {
+            duration: 520,
+            delay: 240 + idx * 90,
+            easing: "cubic-bezier(0.34, 1.56, 0.64, 1)",
+            fill: "forwards"
+          }
+        );
+      });
+    },
+
+    staggerIn(elements, staggerMs = 32) {
+      if (this.prefersReducedMotion() || !elements) return;
+      Array.from(elements).forEach((el, idx) => {
+        if (typeof el.animate === "function") {
+          el.animate(
+            [
+              { opacity: 0, transform: "translateY(8px)" },
+              { opacity: 1, transform: "translateY(0)" }
+            ],
+            {
+              duration: 340,
+              delay: Math.min(idx * staggerMs, 320),
+              easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+              fill: "both"
+            }
+          );
+        }
+      });
+    },
+
+    springIn(element) {
+      if (this.prefersReducedMotion() || !element || typeof element.animate !== "function") return;
+      element.animate(
+        [
+          { opacity: 0, transform: "translateY(10px) scale(0.97)" },
+          { opacity: 1, transform: "translateY(0) scale(1)" }
+        ],
+        {
+          duration: 260,
+          easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+          fill: "both"
+        }
+      );
+    }
+  };
+
+  // ==========================================================================
+  // 1. PRODUCTION SNACKBAR / TOAST NOTIFICATION ENGINE
+  // ==========================================================================
   const GiteaSnackbar = {
     show(title, message, type = "info", durationMs = 4200) {
       const viewport = document.getElementById("snackbarViewport");
@@ -41,6 +126,8 @@
       item.appendChild(progress);
       viewport.appendChild(item);
 
+      PersMotion.springIn(item);
+
       const remove = () => {
         if (item.parentNode) item.parentNode.removeChild(item);
       };
@@ -56,11 +143,15 @@
     warning(title, msg) { this.show(title, msg, "warning", 5000); }
   };
 
+  // ==========================================================================
+  // 2. PRODUCTION DIALOG MODAL ENGINE (<dialog>)
+  // ==========================================================================
   const GiteaDialog = {
     open(id) {
       const dlg = document.getElementById(id);
       if (dlg && typeof dlg.showModal === "function") {
         dlg.showModal();
+        PersMotion.springIn(dlg);
       }
     },
     close(id) {
@@ -91,6 +182,7 @@
         okBtn.addEventListener("click", onOk);
         cancelBtn.addEventListener("click", onCancel);
         dlg.showModal();
+        PersMotion.springIn(dlg);
       });
     }
   };
@@ -99,6 +191,9 @@
     btn.addEventListener("click", () => GiteaDialog.close(btn.getAttribute("data-close-dialog")));
   });
 
+  // ==========================================================================
+  // 3. APPLICATION STATE & COOKIE-AUTHENTICATED API CLIENT
+  // ==========================================================================
   const state = {
     currentUser: null,
     repositories: [],
@@ -107,7 +202,8 @@
     activeBranch: "main",
     activeTreePath: "",
     activeIssue: null,
-    activePr: null
+    activePr: null,
+    activeCiRun: null
   };
 
   async function apiFetch(path, options = {}) {
@@ -139,6 +235,9 @@
     return [];
   }
 
+  // ==========================================================================
+  // 4. DATA LOADING & RENDERING
+  // ==========================================================================
   async function loadCurrentUser() {
     try {
       const user = await apiFetch("/api/v1/auth/me");
@@ -187,6 +286,7 @@
         row.appendChild(summarySpan);
         container.appendChild(row);
       });
+      PersMotion.staggerIn(container.children, 20);
     } catch (err) {
       console.error(err);
     }
@@ -227,6 +327,7 @@
 
         listEl.appendChild(item);
       });
+      PersMotion.staggerIn(listEl.children, 30);
     } catch (err) {
       GiteaSnackbar.error("Failed to load repositories", err.message);
     }
@@ -267,6 +368,7 @@
         loadCommits(),
         loadIssues(),
         loadPullRequests(),
+        loadCiWorkflowRuns(),
         loadCollaborators(),
         loadWebhooks()
       ]);
@@ -292,8 +394,8 @@
         tr.style.cursor = "pointer";
 
         const tdName = document.createElement("td");
-        tdName.style.fontWeight = entry.type === "tree" ? "700" : "500";
-        tdName.style.color = entry.type === "tree" ? "var(--accent-blue)" : "var(--text-primary)";
+        tdName.style.fontWeight = entry.type === "tree" ? "600" : "500";
+        tdName.style.color = entry.type === "tree" ? "var(--brand-primary)" : "var(--text-primary)";
         tdName.textContent = (entry.type === "tree" ? "📁 " : "📄 ") + entry.name;
 
         const tdType = document.createElement("td");
@@ -323,6 +425,7 @@
 
         tbody.appendChild(tr);
       });
+      PersMotion.staggerIn(tbody.children, 24);
     } catch (err) {
       GiteaSnackbar.error("Tree Error", err.message);
     }
@@ -338,7 +441,9 @@
       } else {
         document.getElementById("blobContentPre").textContent = res.content + (res.isTruncated ? "\n\n... [Truncated at 1 MB preview limit]" : "");
       }
-      document.getElementById("blobViewerCard").style.display = "block";
+      const card = document.getElementById("blobViewerCard");
+      card.style.display = "block";
+      PersMotion.springIn(card);
     } catch (err) {
       GiteaSnackbar.error("File Load Error", err.message);
     }
@@ -424,6 +529,7 @@
 
       const card = document.getElementById("issueDetailCard");
       card.style.display = "block";
+      PersMotion.springIn(card);
       document.getElementById("issueDetailTitle").textContent = `#${bundle.issue.issueIndex} ${bundle.issue.title} [${bundle.issue.state.toUpperCase()}]`;
       document.getElementById("issueDetailBody").textContent = bundle.issue.body;
       document.getElementById("toggleIssueStateBtn").textContent = bundle.issue.state === "open" ? "Close Issue" : "Reopen Issue";
@@ -501,6 +607,7 @@
 
       const card = document.getElementById("prDetailCard");
       card.style.display = "block";
+      PersMotion.springIn(card);
       document.getElementById("prDetailTitle").textContent = `PR #${pr.pullIndex}: ${pr.title} [${pr.state.toUpperCase()}]`;
       document.getElementById("prDetailMeta").textContent =
         `Branch ${pr.sourceBranch} into ${pr.targetBranch} • ${diff.filesChanged} file(s) changed` +
@@ -527,6 +634,83 @@
       });
     } catch (err) {
       GiteaSnackbar.error("Failed to load PR diff", err.message);
+    }
+  }
+
+  async function loadCiWorkflowRuns() {
+    const container = document.getElementById("ciRunsListContainer");
+    if (!container) return;
+    container.innerHTML = "";
+    try {
+      const res = await apiFetch(`/api/v1/repos/${state.activeOwner}/${state.activeRepo}/actions/runs`);
+      const runs = unwrapItems(res);
+      const countEl = document.getElementById("tabActionsCount");
+      if (countEl) countEl.textContent = String(res.totalCount ?? runs.length);
+
+      if (runs.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "card-body";
+        empty.style.color = "var(--text-muted)";
+        empty.textContent = "No CI/CD workflow runs recorded yet. Click '▶ Run CI/CD Pipeline' or push a commit.";
+        container.appendChild(empty);
+        return;
+      }
+
+      runs.forEach((run) => {
+        const row = document.createElement("div");
+        row.className = "repo-item";
+
+        const left = document.createElement("div");
+        const title = document.createElement("div");
+        title.style.fontWeight = "600";
+        title.textContent = `Run #${run.runIndex} — ${run.workflowName}`;
+
+        const sub = document.createElement("div");
+        sub.style.fontSize = "0.78rem";
+        sub.style.color = "var(--text-muted)";
+        sub.textContent = `[${run.eventType}] branch ${run.branch} (${(run.commitSha || "").slice(0, 8)}) • by @${run.triggeredByUsername} • ${run.durationMs.toFixed(1)}ms`;
+
+        left.appendChild(title);
+        left.appendChild(sub);
+
+        const badge = document.createElement("span");
+        badge.className = run.status === "success"
+          ? "badge badge-open"
+          : (run.status === "failed" ? "badge badge-closed" : "badge badge-merged");
+        badge.textContent = run.status.toUpperCase();
+
+        row.appendChild(left);
+        row.appendChild(badge);
+        row.addEventListener("click", () => openCiRunDetail(run.runIndex));
+        container.appendChild(row);
+      });
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  async function openCiRunDetail(runIndex) {
+    try {
+      const run = await apiFetch(`/api/v1/repos/${state.activeOwner}/${state.activeRepo}/actions/runs/${runIndex}`);
+      state.activeCiRun = run;
+
+      const card = document.getElementById("ciRunDetailCard");
+      if (!card) return;
+      card.style.display = "block";
+      PersMotion.springIn(card);
+
+      document.getElementById("ciRunDetailTitle").textContent = `CI/CD Run #${run.runIndex}: ${run.workflowName}`;
+      const badge = document.getElementById("ciRunStatusBadge");
+      badge.className = run.status === "success"
+        ? "badge badge-open"
+        : (run.status === "failed" ? "badge badge-closed" : "badge badge-merged");
+      badge.textContent = run.status.toUpperCase();
+
+      document.getElementById("ciRunDetailMeta").textContent =
+        `Event: ${run.eventType} • Branch: ${run.branch} • Commit: ${(run.commitSha || "").slice(0, 12)} • Triggered by @${run.triggeredByUsername} • Duration: ${run.durationMs.toFixed(1)} ms`;
+      document.getElementById("ciRunLogsViewer").textContent = run.logsText || "Pipeline queued...";
+    } catch (err) {
+      GiteaSnackbar.error("Failed to load CI/CD run logs", err.message);
     }
   }
 
@@ -566,12 +750,15 @@
 
   async function loadWebhooks() {
     const container = document.getElementById("webhooksListContainer");
+    const delivContainer = document.getElementById("webhookDeliveriesContainer");
     container.innerHTML = "";
+    if (delivContainer) delivContainer.innerHTML = "";
+
     if (!state.currentUser) {
       const msg = document.createElement("div");
       msg.className = "card-body";
       msg.style.color = "var(--text-muted)";
-      msg.textContent = "Sign in as Repository Owner or Admin to view webhooks.";
+      msg.textContent = "Sign in as Repository Owner or Admin to view webhooks and delivery logs.";
       container.appendChild(msg);
       return;
     }
@@ -583,25 +770,62 @@
         empty.style.color = "var(--text-muted)";
         empty.textContent = "No webhooks configured for this repository.";
         container.appendChild(empty);
-        return;
+      } else {
+        hooks.forEach((h) => {
+          const row = document.createElement("div");
+          row.className = "repo-item";
+          row.style.cursor = "default";
+
+          const left = document.createElement("div");
+          left.style.fontWeight = "600";
+          left.textContent = `${h.targetUrl} ${h.hasSecret ? "(HMAC-SHA256 Secret Active)" : ""}`;
+
+          const right = document.createElement("span");
+          right.className = "badge badge-open";
+          right.textContent = h.eventsCsv;
+
+          row.appendChild(left);
+          row.appendChild(right);
+          container.appendChild(row);
+        });
       }
-      hooks.forEach((h) => {
-        const row = document.createElement("div");
-        row.className = "repo-item";
-        row.style.cursor = "default";
 
-        const left = document.createElement("div");
-        left.style.fontWeight = "600";
-        left.textContent = `${h.targetUrl} ${h.hasSecret ? "(HMAC Secret Active)" : ""}`;
+      if (delivContainer) {
+        const deliveries = await apiFetch(`/api/v1/repos/${state.activeOwner}/${state.activeRepo}/webhooks/deliveries`);
+        if (deliveries.length === 0) {
+          const emptyDeliv = document.createElement("div");
+          emptyDeliv.className = "card-body";
+          emptyDeliv.style.color = "var(--text-muted)";
+          emptyDeliv.textContent = "No webhook deliveries recorded yet.";
+          delivContainer.appendChild(emptyDeliv);
+        } else {
+          deliveries.forEach((d) => {
+            const row = document.createElement("div");
+            row.className = "repo-item";
+            row.style.cursor = "default";
 
-        const right = document.createElement("span");
-        right.className = "badge badge-open";
-        right.textContent = h.eventsCsv;
+            const left = document.createElement("div");
+            const title = document.createElement("div");
+            title.style.fontWeight = "600";
+            title.textContent = `[${d.eventName}] → ${d.targetUrl} (Attempt #${d.attemptCount}, ${d.durationMs.toFixed(1)}ms)`;
+            const sig = document.createElement("div");
+            sig.style.fontSize = "0.75rem";
+            sig.style.fontFamily = "var(--font-mono)";
+            sig.style.color = "var(--text-muted)";
+            sig.textContent = `X-Gitea-Signature-256: ${d.signatureHeader.slice(0, 32)}...`;
+            left.appendChild(title);
+            left.appendChild(sig);
 
-        row.appendChild(left);
-        row.appendChild(right);
-        container.appendChild(row);
-      });
+            const badge = document.createElement("span");
+            badge.className = d.status === "delivered" ? "badge badge-open" : "badge badge-closed";
+            badge.textContent = `${d.status.toUpperCase()} (${d.statusCode || "ERR"})`;
+
+            row.appendChild(left);
+            row.appendChild(badge);
+            delivContainer.appendChild(row);
+          });
+        }
+      }
     } catch {
       const msg = document.createElement("div");
       msg.className = "card-body";
@@ -658,22 +882,93 @@
     }
   }
 
-  // Tabs switching
+  // Tabs switching with PersMotion spring transition
   document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
       document.querySelectorAll(".tab-panel").forEach((p) => (p.style.display = "none"));
       btn.classList.add("active");
       const target = document.getElementById(`tabPanel-${btn.getAttribute("data-tab")}`);
-      if (target) target.style.display = "block";
+      if (target) {
+        target.style.display = "block";
+        PersMotion.springIn(target);
+      }
     });
   });
+
+  // Replay SVG Logo draw-in choreography on click
+  document.getElementById("navHomeBtn").addEventListener("click", () => PersMotion.animateLogoDraw());
+  const replayLogoBtn = document.getElementById("replayLogoAnimBtn");
+  if (replayLogoBtn) {
+    replayLogoBtn.addEventListener("click", () => {
+      PersMotion.animateLogoDraw();
+      GiteaSnackbar.show("Per’s Git Emblem", "Replayed SVG branch-and-merge vector animation.");
+    });
+  }
+
+  // Hot Backup button
+  const hotBackupBtn = document.getElementById("triggerHotBackupBtn");
+  if (hotBackupBtn) {
+    hotBackupBtn.addEventListener("click", async () => {
+      try {
+        const res = await apiFetch("/api/v1/admin/backup", { method: "POST" });
+        GiteaSnackbar.success("SQLite Hot Backup Completed", `Snapshot saved: ${res.fileName}`);
+        await loadAuditLogs();
+      } catch (err) {
+        GiteaSnackbar.error("Hot Backup Requires Admin", err.message);
+      }
+    });
+  }
+
+  // CI/CD Actions buttons
+  const refreshCiBtn = document.getElementById("refreshCiRunsBtn");
+  if (refreshCiBtn) {
+    refreshCiBtn.addEventListener("click", async () => {
+      await loadCiWorkflowRuns();
+      GiteaSnackbar.show("CI/CD Actions", "Refreshed workflow run list.");
+    });
+  }
+
+  const triggerCiBtn = document.getElementById("triggerCiWorkflowBtn");
+  if (triggerCiBtn) {
+    triggerCiBtn.addEventListener("click", async () => {
+      try {
+        const run = await apiFetch(`/api/v1/repos/${state.activeOwner}/${state.activeRepo}/actions/runs`, {
+          method: "POST",
+          body: JSON.stringify({
+            branch: state.activeBranch,
+            workflowName: "Per's Git Production CI/CD Pipeline"
+          })
+        });
+        GiteaSnackbar.success("CI/CD Pipeline Completed", `Run #${run.runIndex} finished with ${run.status.toUpperCase()} (${run.durationMs.toFixed(1)}ms)`);
+        await loadCiWorkflowRuns();
+        await openCiRunDetail(run.runIndex);
+        await loadAuditLogs();
+      } catch (err) {
+        GiteaSnackbar.error("CI/CD Trigger Failed", err.message);
+      }
+    });
+  }
+
+  // Test Webhook Delivery button
+  const testWhBtn = document.getElementById("testWebhookDeliveryBtn");
+  if (testWhBtn) {
+    testWhBtn.addEventListener("click", async () => {
+      try {
+        await apiFetch(`/api/v1/repos/${state.activeOwner}/${state.activeRepo}/webhooks/test`, { method: "POST" });
+        GiteaSnackbar.success("Webhook Event Enqueued", "Dispatched test push payload to background outbox.");
+        setTimeout(() => loadWebhooks(), 600);
+      } catch (err) {
+        GiteaSnackbar.error("Webhook Test Failed", err.message);
+      }
+    });
+  }
 
   document.getElementById("toggleThemeBtn").addEventListener("click", () => {
     const root = document.documentElement;
     const next = root.getAttribute("data-theme") === "light" ? "dark" : "light";
     root.setAttribute("data-theme", next);
-    GiteaSnackbar.show("Theme Updated", `Switched interface to ${next} mode.`);
+    GiteaSnackbar.show("Theme Updated", `Switched interface to Claude ${next} palette.`);
   });
 
   document.getElementById("repoSearchInput").addEventListener("input", (e) => {
@@ -718,7 +1013,6 @@
     }
   });
 
-  // Open Dialog Buttons
   document.getElementById("openCreateRepoDialogBtn").addEventListener("click", () => GiteaDialog.open("createRepoDialog"));
   document.getElementById("openCommitFileDialogBtn").addEventListener("click", () => {
     document.getElementById("commitBranchInput").value = state.activeBranch;
@@ -855,7 +1149,7 @@
         body: JSON.stringify(payload)
       });
       GiteaDialog.close("commitFileDialog");
-      GiteaSnackbar.success("Committed via Plumbing", `Commit ${res.sha.slice(0, 8)} pushed to ${res.branch}`);
+      GiteaSnackbar.success("Committed via Plumbing", `Commit ${res.sha.slice(0, 8)} pushed to ${res.branch} (CI Run #${res.ciRunIndex || 1})`);
       await selectRepository(state.activeOwner, state.activeRepo);
       await loadAuditLogs();
     } catch (err) {
@@ -964,7 +1258,7 @@
         body: JSON.stringify(payload)
       });
       GiteaDialog.close("createPrDialog");
-      GiteaSnackbar.success("Pull Request Opened", `Created PR #${pr.pullIndex}`);
+      GiteaSnackbar.success("Pull Request Opened", `Created PR #${pr.pullIndex} & triggered CI/CD`);
       await selectRepository(state.activeOwner, state.activeRepo);
       await openPullRequestDetail(pr.pullIndex);
       await loadAuditLogs();
@@ -1061,6 +1355,7 @@
   });
 
   (async function init() {
+    PersMotion.animateLogoDraw();
     await loadCurrentUser();
     await loadSystemHealth();
     await loadRepositories();

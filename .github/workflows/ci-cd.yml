@@ -1,0 +1,139 @@
+name: Per's Git (Gitea.Net) — Production CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main", "master", "develop", "feature/**" ]
+  pull_request:
+    branches: [ "main", "master", "develop" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_NOLOGO: true
+  GITEA_NET_TOKEN_SECRET: "GitHubActions-CI-Production-Grade-32Byte-SecretKey-2026!"
+
+jobs:
+  # ============================================================================
+  # JOB 1: Static C# 12 Lexer, Package Integrity, Dual-Provider xUnit & Build
+  # ============================================================================
+  build-and-test:
+    name: Build & Test (SQLite WAL + PostgreSQL 16 Matrix)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gitea_ci
+          POSTGRES_PASSWORD: gitea_ci_password_2026
+          POSTGRES_DB: gitea_net_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Verify Git CLI Version (>= 2.38 required for git merge-tree)
+        run: git --version
+
+      - name: Setup .NET 8.0 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Setup Python 3.11 for Static Lexer & Package Auditors
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Step 1 — Run C# 12 Lexer & Brace-Balance Audit
+        run: python3 tools/csharp_lexer_check.py .
+
+      - name: Step 2 — Run Python/SQLite/Git-CLI Reference & Concurrency Harness
+        run: python3 tools/python_reference_harness.py
+
+      - name: Step 3 — Verify Package, Namespace & README Reference Integrity
+        run: python3 tools/verify_package_integrity.py .
+
+      - name: Step 4 — Restore & Release Build (Zero Warnings Allowed)
+        run: |
+          dotnet restore Gitea.Net.sln
+          dotnet build Gitea.Net.sln -c Release --no-restore --warnaserror | tee artifacts/verification/dotnet_build_release.log
+
+      - name: Step 5A — Run xUnit Regression Suite on SQLite (WAL Mode)
+        env:
+          GITEA_TEST_PROVIDER: "Sqlite"
+        run: |
+          dotnet test tests/Gitea.Net.Tests/Gitea.Net.Tests.csproj -c Release --no-build \
+            --logger "trx;LogFileName=test_results_sqlite.trx" \
+            --results-directory ./artifacts/verification
+
+      - name: Step 5B — Run xUnit Regression Suite on PostgreSQL 16 (Npgsql)
+        env:
+          GITEA_TEST_PROVIDER: "Postgres"
+          GITEA_POSTGRES_CONN: "Host=127.0.0.1;Port=5432;Database=gitea_net_ci;Username=gitea_ci;Password=gitea_ci_password_2026;Pooling=true;"
+        run: |
+          dotnet test tests/Gitea.Net.Tests/Gitea.Net.Tests.csproj -c Release --no-build \
+            --logger "trx;LogFileName=test_results_postgres.trx" \
+            --results-directory ./artifacts/verification
+
+      - name: Step 6 — Verify Online SQLite Hot Backup Script
+        run: |
+          chmod +x scripts/sqlite_hot_backup.sh
+          ./verify_all.sh
+
+      - name: Upload Verification Logs, TRX Test Results & JTL Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pers-git-verification-evidence
+          path: artifacts/verification/*
+          retention-days: 30
+
+  # ============================================================================
+  # JOB 2: Production Multi-Stage Docker Container Build & Smoke Test
+  # ============================================================================
+  docker-production-verify:
+    name: Docker Multi-Stage Build & Live Health Smoke Test
+    needs: build-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Build Production Alpine Container Image (UID 10001)
+        run: docker build -t pers-git-server:ci-release -f Dockerfile .
+
+      - name: Boot Container & Run Live HTTP + Git Smart HTTP Smoke Test
+        run: |
+          docker run -d --name pers-git-smoke \
+            -p 5000:5000 \
+            -e ASPNETCORE_ENVIRONMENT=Development \
+            -e GITEA_NET_TOKEN_SECRET="DockerSmokeTest-32Byte-Minimum-SecretKey-2026!" \
+            pers-git-server:ci-release
+
+          for i in {1..20}; do
+            if curl -fsS http://127.0.0.1:5000/api/v1/health; then
+              echo "Container is healthy!"
+              break
+            fi
+            sleep 1
+          done
+
+          curl -fsS http://127.0.0.1:5000/api/v1/health | grep -q "healthy"
+          curl -fsS http://127.0.0.1:5000/metrics | grep -q "pers_git_up 1"
+          git clone http://127.0.0.1:5000/gitea-admin/gitea-dotnet-core.git /tmp/smoke_clone
+          test -f /tmp/smoke_clone/README.md
+          docker rm -f pers-git-smoke

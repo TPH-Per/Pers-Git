@@ -30,6 +30,8 @@ builder.Services.AddSingleton<WebhookDeliveryService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<WebhookDeliveryService>());
 builder.Services.AddSingleton<MergeReconcilerHostedService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MergeReconcilerHostedService>());
+builder.Services.AddSingleton<CiPipelineRunnerService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<CiPipelineRunnerService>());
 
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
@@ -178,6 +180,7 @@ using (var scope = app.Services.CreateScope())
     var sec = scope.ServiceProvider.GetRequiredService<SecurityService>();
     var git = scope.ServiceProvider.GetRequiredService<GitEngineService>();
     var reconciler = scope.ServiceProvider.GetRequiredService<MergeReconcilerHostedService>();
+    var ciRunner = scope.ServiceProvider.GetRequiredService<CiPipelineRunnerService>();
     var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Bootstrap");
 
     await git.EnsureMinimumGitVersionAsync();
@@ -214,7 +217,7 @@ using (var scope = app.Services.CreateScope())
             hash,
             salt,
             isAdmin: true,
-            avatarColor: "#2563eb",
+            avatarColor: "#C96442",
             mustChangePassword: !isDev);
 
         if (generatedRandom)
@@ -246,7 +249,7 @@ using (var scope = app.Services.CreateScope())
                 devHash,
                 devSalt,
                 isAdmin: false,
-                avatarColor: "#059669",
+                avatarColor: "#2E6F4E",
                 mustChangePassword: false);
 
             var repo = await db.CreateRepositoryAsync(
@@ -277,13 +280,34 @@ using (var scope = app.Services.CreateScope())
                 }
                 """;
 
-            await git.CommitFileAsync(
+            string mainSha = await git.CommitFileAsync(
                 admin.Username,
                 repo.Name,
                 "main",
                 "src/Kernel.cs",
                 kernelSource,
                 "Add core Kernel.cs module",
+                admin.FullName,
+                admin.Email);
+
+            const string ciWorkflowYaml = """
+                name: Per's Git Production CI/CD Pipeline
+                on: [push, pull_request, workflow_dispatch]
+                jobs:
+                  verify-and-test:
+                    runs-on: ubuntu-latest
+                    steps:
+                      - name: Verify C# 12 Lexer & Zero N+1 SQL
+                        run: ./verify_all.sh
+                """;
+
+            mainSha = await git.CommitFileAsync(
+                admin.Username,
+                repo.Name,
+                "main",
+                ".github/workflows/ci-cd.yml",
+                ciWorkflowYaml,
+                "ci: add automated CI/CD workflow pipeline definition",
                 admin.FullName,
                 admin.Email);
 
@@ -329,7 +353,16 @@ using (var scope = app.Services.CreateScope())
                 "feature/zero-n-plus-one",
                 "main");
 
-            await db.AppendAuditLogAsync(admin.Id, admin.Username, "system.seed", "Initialized development workspace and Git repository.");
+            var seededCiRun = await db.CreateCiWorkflowRunAsync(
+                repo.Id,
+                "Per's Git Production CI/CD Pipeline",
+                "push",
+                "main",
+                mainSha,
+                admin.Id);
+            await ciRunner.ExecutePipelineNowAsync(repo.Id, seededCiRun.Id);
+
+            await db.AppendAuditLogAsync(admin.Id, admin.Username, "system.seed", "Initialized development workspace, CI/CD workflow, and Git repository.");
         }
     }
 }
@@ -417,6 +450,33 @@ app.MapPost("/api/v1/admin/reconcile", async (HttpContext ctx, GiteaDbRepository
     return Results.Ok(new { status = "reconciled" });
 }).RequireAuthorization("AdminOnly");
 
+app.MapPost("/api/v1/admin/backup", async (HttpContext ctx, IHostEnvironment env, GiteaDbRepository db, CancellationToken ct) =>
+{
+    var actor = await GetAuthenticatedUserAsync(ctx, db);
+    if (actor is null) return Results.Unauthorized();
+    var scopeErr = CheckMustChangePasswordAndScope(ctx, actor, "admin");
+    if (scopeErr is not null) return scopeErr;
+
+    string backupDir = Path.Combine(env.ContentRootPath, "App_Data", "backups");
+    string backupFile = await db.CreateSqliteHotBackupAsync(backupDir, ct);
+    await db.AppendAuditLogAsync(actor.Id, actor.Username, "admin.backup", $"Created online SQLite hot backup ({Path.GetFileName(backupFile)})", ct);
+    return Results.Ok(new { status = "backed_up", fileName = Path.GetFileName(backupFile), createdAt = DateTimeOffset.UtcNow });
+}).RequireAuthorization("AdminOnly");
+
+app.MapGet("/metrics", async (GiteaDbRepository db, KeyedLockProvider locks, CancellationToken ct) =>
+{
+    bool healthy = await db.CheckHealthAsync(ct);
+    string metricsText = string.Join("\n",
+        "# HELP pers_git_up Whether Per's Git server and database are healthy (1 = up, 0 = down).",
+        "# TYPE pers_git_up gauge",
+        $"pers_git_up {(healthy ? 1 : 0)}",
+        "# HELP pers_git_active_repo_locks Current number of active repository locks in KeyedLockProvider.",
+        "# TYPE pers_git_active_repo_locks gauge",
+        $"pers_git_active_repo_locks {locks.ActiveKeyCount}",
+        "");
+    return Results.Text(metricsText, "text/plain; version=0.0.4; charset=utf-8");
+});
+
 // ==================== AUTH, SESSION, PASSWORD CHANGE & PAT API ====================
 
 app.MapPost("/api/v1/auth/register", async (HttpContext ctx, RegisterRequest? req, IConfiguration config, GiteaDbRepository db, SecurityService sec, CancellationToken ct) =>
@@ -443,7 +503,7 @@ app.MapPost("/api/v1/auth/register", async (HttpContext ctx, RegisterRequest? re
         return Results.BadRequest(new { error = "Password must be between 8 and 128 characters." });
 
     var (hash, salt) = sec.HashPassword(password);
-    var user = await db.CreateUserAsync(username, email, fullName, hash, salt, isAdmin: false, avatarColor: "#7c3aed", mustChangePassword: false, ct);
+    var user = await db.CreateUserAsync(username, email, fullName, hash, salt, isAdmin: false, avatarColor: "#8C5A3C", mustChangePassword: false, ct);
     await db.AppendAuditLogAsync(user.Id, user.Username, "user.register", $"Registered account @{user.Username}", ct);
 
     var (token, _, expiresAt) = sec.IssueToken(user);
@@ -772,7 +832,7 @@ app.MapGet("/api/v1/repos/{owner}/{repo}/blob", async (HttpContext ctx, string o
 
 app.MapPost("/api/v1/repos/{owner}/{repo}/commits", async (
     HttpContext ctx, string owner, string repo, CreateFileCommitRequest? req,
-    GiteaDbRepository db, GitEngineService git, WebhookDeliveryService webhooks, CancellationToken ct) =>
+    GiteaDbRepository db, GitEngineService git, WebhookDeliveryService webhooks, CiPipelineRunnerService ciRunner, CancellationToken ct) =>
 {
     var actor = await GetAuthenticatedUserAsync(ctx, db);
     if (actor is null) return Results.Unauthorized();
@@ -804,7 +864,8 @@ app.MapPost("/api/v1/repos/{owner}/{repo}/commits", async (
     await db.TouchRepositoryUpdatedAtAsync(entity.Id, ct);
     await db.AppendAuditLogAsync(actor.Id, actor.Username, "git.commit", $"Committed {filePath} to {entity.OwnerUsername}/{entity.Name}@{branch} ({sha[..7]})", ct);
     webhooks.EnqueueEvent(entity.Id, "push", new { repository = entity.Name, branch, commitSha = sha, filePath, pusher = actor.Username });
-    return Results.Ok(new { sha, branch, filePath });
+    var ciRun = await ciRunner.EnqueueCiRunAsync(entity.Id, "Per's Git Production CI/CD Pipeline", "push", branch, sha, actor.Id, ct);
+    return Results.Ok(new { sha, branch, filePath, ciRunIndex = ciRun.RunIndex });
 }).RequireAuthorization("Authenticated");
 
 app.MapGet("/api/v1/repos/{owner}/{repo}/commits", async (HttpContext ctx, string owner, string repo, string? @ref, GiteaDbRepository db, GitEngineService git, CancellationToken ct) =>
@@ -946,7 +1007,7 @@ app.MapGet("/api/v1/repos/{owner}/{repo}/pulls", async (HttpContext ctx, string 
 
 app.MapPost("/api/v1/repos/{owner}/{repo}/pulls", async (
     HttpContext ctx, string owner, string repo, CreatePullRequest? req,
-    GiteaDbRepository db, GitEngineService git, WebhookDeliveryService webhooks, CancellationToken ct) =>
+    GiteaDbRepository db, GitEngineService git, WebhookDeliveryService webhooks, CiPipelineRunnerService ciRunner, CancellationToken ct) =>
 {
     var actor = await GetAuthenticatedUserAsync(ctx, db);
     if (actor is null) return Results.Unauthorized();
@@ -978,6 +1039,7 @@ app.MapPost("/api/v1/repos/{owner}/{repo}/pulls", async (
     var pr = await db.CreatePullRequestAsync(entity.Id, actor.Id, title, body, sourceBranch, targetBranch, ct);
     await db.AppendAuditLogAsync(actor.Id, actor.Username, "pull.create", $"Opened PR #{pr.PullIndex} ({sourceBranch} -> {targetBranch}) in {entity.OwnerUsername}/{entity.Name}", ct);
     webhooks.EnqueueEvent(entity.Id, "pull_request", new { action = "opened", pullRequest = pr });
+    await ciRunner.EnqueueCiRunAsync(entity.Id, "Per's Git Production CI/CD Pipeline", "pull_request", sourceBranch, null, actor.Id, ct);
     return Results.Created($"/api/v1/repos/{owner}/{repo}/pulls/{pr.PullIndex}", pr);
 }).RequireAuthorization("Authenticated");
 
@@ -1024,7 +1086,7 @@ app.MapPatch("/api/v1/repos/{owner}/{repo}/pulls/{index:long}/state", async (
 
 app.MapPost("/api/v1/repos/{owner}/{repo}/pulls/{index:long}/merge", async (
     HttpContext ctx, string owner, string repo, long index, MergePullRequest? req,
-    GiteaDbRepository db, GitEngineService git, WebhookDeliveryService webhooks, CancellationToken ct) =>
+    GiteaDbRepository db, GitEngineService git, WebhookDeliveryService webhooks, CiPipelineRunnerService ciRunner, CancellationToken ct) =>
 {
     var actor = await GetAuthenticatedUserAsync(ctx, db);
     if (actor is null) return Results.Unauthorized();
@@ -1099,7 +1161,63 @@ app.MapPost("/api/v1/repos/{owner}/{repo}/pulls/{index:long}/merge", async (
     await db.AppendAuditLogAsync(actor.Id, actor.Username, "pull.merge", $"Merged PR #{index} into {pr.TargetBranch} ({mergedSha![..7]}) in {entity.OwnerUsername}/{entity.Name}", ct);
     var updatedPr = await db.GetPullRequestAsync(entity.Id, index, ct);
     webhooks.EnqueueEvent(entity.Id, "pull_request", new { action = "merged", pullRequest = updatedPr });
+    await ciRunner.EnqueueCiRunAsync(entity.Id, "Per's Git Production CI/CD Pipeline", "push", pr.TargetBranch, mergedSha, actor.Id, ct);
     return Results.Ok(updatedPr);
+}).RequireAuthorization("Authenticated");
+
+// ==================== CI/CD ACTIONS PIPELINE API (ZERO N+1, ATOMIC SEQUENCE & CAS RUNNER) ====================
+
+app.MapGet("/api/v1/repos/{owner}/{repo}/actions/runs", async (
+    HttpContext ctx, string owner, string repo, int? page, int? pageSize, GiteaDbRepository db, CancellationToken ct) =>
+{
+    var (entity, _, _, _, err) = await ResolveAuthorizedRepoAsync(ctx, owner, repo, "repo:read", db, ct);
+    if (err is not null) return err;
+
+    var runs = await db.ListCiWorkflowRunsAsync(entity!.Id, page ?? 1, pageSize ?? 25, ct);
+    return Results.Ok(runs);
+});
+
+app.MapGet("/api/v1/repos/{owner}/{repo}/actions/runs/{runIndex:long}", async (
+    HttpContext ctx, string owner, string repo, long runIndex, GiteaDbRepository db, CancellationToken ct) =>
+{
+    var (entity, _, _, _, err) = await ResolveAuthorizedRepoAsync(ctx, owner, repo, "repo:read", db, ct);
+    if (err is not null) return err;
+
+    var run = await db.GetCiWorkflowRunAsync(entity!.Id, runIndex, ct);
+    if (run is null) return Results.NotFound(new { error = "CI/CD workflow run not found." });
+    return Results.Ok(run);
+});
+
+app.MapPost("/api/v1/repos/{owner}/{repo}/actions/runs", async (
+    HttpContext ctx, string owner, string repo, TriggerCiWorkflowRequest? req,
+    GiteaDbRepository db, GitEngineService git, CiPipelineRunnerService ciRunner, CancellationToken ct) =>
+{
+    var actor = await GetAuthenticatedUserAsync(ctx, db);
+    if (actor is null) return Results.Unauthorized();
+
+    var (entity, _, canWrite, _, err) = await ResolveAuthorizedRepoAsync(ctx, owner, repo, "repo:write", db, ct);
+    if (err is not null) return err;
+    if (!canWrite) return Results.StatusCode(StatusCodes.Status403Forbidden);
+
+    string branch = string.IsNullOrWhiteSpace(req?.Branch) ? entity!.DefaultBranch : req.Branch.Trim();
+    if (!GitEngineService.ValidateRefFormat(branch))
+        return Results.BadRequest(new { error = "Invalid branch name." });
+
+    string workflowName = string.IsNullOrWhiteSpace(req?.WorkflowName)
+        ? "Per's Git Production CI/CD Pipeline"
+        : req.WorkflowName.Trim();
+    if (workflowName.Length > 140)
+        return Results.BadRequest(new { error = "Workflow name cannot exceed 140 characters." });
+
+    var commits = await git.ListCommitsAsync(entity!.OwnerUsername, entity.Name, branch, 1, ct);
+    string headSha = commits.Count > 0 ? commits[0].Sha : "0000000000000000000000000000000000000000";
+
+    var queuedRun = await db.CreateCiWorkflowRunAsync(entity.Id, workflowName, "workflow_dispatch", branch, headSha, actor.Id, ct);
+    await ciRunner.ExecutePipelineNowAsync(entity.Id, queuedRun.Id, ct);
+
+    var completedRun = await db.GetCiWorkflowRunAsync(entity.Id, queuedRun.RunIndex, ct);
+    await db.AppendAuditLogAsync(actor.Id, actor.Username, "ci.workflow.dispatch", $"Triggered CI/CD workflow #{queuedRun.RunIndex} on {entity.OwnerUsername}/{entity.Name}@{branch}", ct);
+    return Results.Created($"/api/v1/repos/{owner}/{repo}/actions/runs/{queuedRun.RunIndex}", completedRun ?? queuedRun);
 }).RequireAuthorization("Authenticated");
 
 // ==================== WEBHOOKS API (OWNER / ADMIN ONLY, SECRET MANDATORY OR AUTO-GENERATED & REDACTED) ====================
@@ -1144,6 +1262,39 @@ app.MapPost("/api/v1/repos/{owner}/{repo}/webhooks", async (HttpContext ctx, str
 
     await db.AppendAuditLogAsync(actor.Id, actor.Username, "webhook.create", $"Added webhook {hook.TargetUrl} on {entity.OwnerUsername}/{entity.Name}", ct);
     return Results.Created($"/api/v1/repos/{owner}/{repo}/webhooks", hook.ToDto());
+}).RequireAuthorization("Authenticated");
+
+app.MapGet("/api/v1/repos/{owner}/{repo}/webhooks/deliveries", async (HttpContext ctx, string owner, string repo, GiteaDbRepository db, CancellationToken ct) =>
+{
+    var actor = await GetAuthenticatedUserAsync(ctx, db);
+    if (actor is null) return Results.Unauthorized();
+
+    var (entity, _, _, canAdmin, err) = await ResolveAuthorizedRepoAsync(ctx, owner, repo, "repo:read", db, ct);
+    if (err is not null) return err;
+    if (!canAdmin) return Results.StatusCode(StatusCodes.Status403Forbidden);
+
+    var deliveries = await db.ListWebhookDeliveriesAsync(entity!.Id, 25, ct);
+    return Results.Ok(deliveries);
+}).RequireAuthorization("Authenticated");
+
+app.MapPost("/api/v1/repos/{owner}/{repo}/webhooks/test", async (HttpContext ctx, string owner, string repo, GiteaDbRepository db, WebhookDeliveryService webhooks, CancellationToken ct) =>
+{
+    var actor = await GetAuthenticatedUserAsync(ctx, db);
+    if (actor is null) return Results.Unauthorized();
+
+    var (entity, _, _, canAdmin, err) = await ResolveAuthorizedRepoAsync(ctx, owner, repo, "repo:write", db, ct);
+    if (err is not null) return err;
+    if (!canAdmin) return Results.StatusCode(StatusCodes.Status403Forbidden);
+
+    webhooks.EnqueueEvent(entity!.Id, "push", new
+    {
+        testDelivery = true,
+        repository = $"{entity.OwnerUsername}/{entity.Name}",
+        triggeredBy = actor.Username,
+        retryPolicy = "Exponential Backoff (1m, 2m, 4m, 8m, 16m)"
+    });
+    await db.AppendAuditLogAsync(actor.Id, actor.Username, "webhook.test", $"Triggered test webhook dispatch on {entity.OwnerUsername}/{entity.Name}", ct);
+    return Results.Accepted($"/api/v1/repos/{owner}/{repo}/webhooks/deliveries", new { status = "enqueued", eventName = "push" });
 }).RequireAuthorization("Authenticated");
 
 // ==================== GIT SMART HTTP PROTOCOL ENDPOINTS (WITH RBAC, SCOPE CHECK & PUSH WEBHOOKS) ====================
@@ -1195,7 +1346,7 @@ app.MapGet("/{owner}/{repo}.git/info/refs", async (HttpContext ctx, string owner
 
 app.MapPost("/{owner}/{repo}.git/{service:regex(^(git-upload-pack|git-receive-pack)$)}", async (
     HttpContext ctx, string owner, string repo, string service,
-    GiteaDbRepository db, GitEngineService git, WebhookDeliveryService webhooks, CancellationToken ct) =>
+    GiteaDbRepository db, GitEngineService git, WebhookDeliveryService webhooks, CiPipelineRunnerService ciRunner, CancellationToken ct) =>
 {
     // Disable Kestrel 30 MB request body size limit so large (>30MB) Git packfiles can be pushed
     var maxBodyFeature = ctx.Features.Get<IHttpMaxRequestBodySizeFeature>();
@@ -1224,6 +1375,7 @@ app.MapPost("/{owner}/{repo}.git/{service:regex(^(git-upload-pack|git-receive-pa
         await db.TouchRepositoryUpdatedAtAsync(entity.Id, CancellationToken.None);
         await db.AppendAuditLogAsync(actor?.Id, actor?.Username ?? "git-client", "git.push", $"Pushed packfile over Smart HTTP to {entity.OwnerUsername}/{entity.Name}", CancellationToken.None);
         webhooks.EnqueueEvent(entity.Id, "push", new { repository = entity.Name, owner = entity.OwnerUsername, pusher = actor?.Username ?? "git-client", transport = "smart-http" });
+        await ciRunner.EnqueueCiRunAsync(entity.Id, "Per's Git Production CI/CD Pipeline", "push", entity.DefaultBranch, null, actor?.Id, CancellationToken.None);
     }
 
     return Results.Empty;

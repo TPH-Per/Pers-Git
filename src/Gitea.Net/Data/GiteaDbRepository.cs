@@ -304,8 +304,31 @@ public sealed class GiteaDbRepository
             CREATE TABLE IF NOT EXISTS repo_counters (
                 repo_id BIGINT PRIMARY KEY,
                 last_issue_index BIGINT NOT NULL DEFAULT 0,
+                last_ci_run_index BIGINT NOT NULL DEFAULT 0,
                 FOREIGN KEY(repo_id) REFERENCES repositories(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS ci_workflow_runs (
+                id {idPk},
+                repo_id BIGINT NOT NULL,
+                run_index BIGINT NOT NULL,
+                triggered_by_user_id BIGINT NOT NULL,
+                workflow_name VARCHAR(160) NOT NULL,
+                trigger_event VARCHAR(64) NOT NULL,
+                branch VARCHAR(120) NOT NULL,
+                commit_sha VARCHAR(64) NOT NULL,
+                status VARCHAR(24) NOT NULL DEFAULT 'queued',
+                logs_text TEXT NOT NULL DEFAULT '',
+                duration_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+                created_at {tsType} NOT NULL,
+                completed_at {tsType} NULL,
+                row_version BIGINT NOT NULL DEFAULT 1,
+                UNIQUE(repo_id, run_index),
+                FOREIGN KEY(repo_id) REFERENCES repositories(id) ON DELETE CASCADE,
+                FOREIGN KEY(triggered_by_user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ci_runs_repo_status ON ci_workflow_runs(repo_id, status);
 
             CREATE TABLE IF NOT EXISTS repo_stars (
                 repo_id BIGINT NOT NULL,
@@ -368,6 +391,21 @@ public sealed class GiteaDbRepository
                 FOREIGN KEY(author_id) REFERENCES users(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                id {idPk},
+                webhook_id BIGINT NOT NULL,
+                repo_id BIGINT NOT NULL,
+                event_name VARCHAR(64) NOT NULL,
+                target_url TEXT NOT NULL,
+                signature_header VARCHAR(128) NOT NULL,
+                status_code INTEGER NOT NULL DEFAULT 0,
+                attempt_count INTEGER NOT NULL DEFAULT 1,
+                status VARCHAR(32) NOT NULL,
+                duration_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+                delivered_at {tsType} NOT NULL,
+                FOREIGN KEY(repo_id) REFERENCES repositories(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS webhooks (
                 id {idPk},
                 repo_id BIGINT NOT NULL,
@@ -404,6 +442,7 @@ public sealed class GiteaDbRepository
         await TryEnsureColumnExistsAsync(conn, "repositories", "open_prs_count", "INTEGER NOT NULL DEFAULT 0", ct);
         await TryEnsureColumnExistsAsync(conn, "issues", "comments_count", "INTEGER NOT NULL DEFAULT 0", ct);
         await TryEnsureColumnExistsAsync(conn, "personal_access_tokens", "last_used_at", $"{tsType} NULL", ct);
+        await TryEnsureColumnExistsAsync(conn, "repo_counters", "last_ci_run_index", "BIGINT NOT NULL DEFAULT 0", ct);
 
         if (IsPostgres)
         {
@@ -1966,6 +2005,360 @@ public sealed class GiteaDbRepository
         return new PagedResult<AuditLogEntity>(list, page, pageSize, total);
     }
 
+
+    public async Task RecordWebhookDeliveryAsync(
+        long webhookId, long repoId, string eventName, string targetUrl, string signatureHeader,
+        int statusCode, int attemptCount, string status, double durationMs, CancellationToken ct = default)
+    {
+        await using var conn = CreateConnection();
+        await conn.OpenAsync(ct);
+
+        const string sql = """
+            INSERT INTO webhook_deliveries (webhook_id, repo_id, event_name, target_url, signature_header, status_code, attempt_count, status, duration_ms, delivered_at)
+            VALUES (@whId, @repoId, @ev, @url, @sig, @code, @att, @st, @dur, @now);
+            """;
+
+        await ExecuteNonQueryAsync(conn, null, sql, ct,
+            ("@whId", webhookId),
+            ("@repoId", repoId),
+            ("@ev", eventName),
+            ("@url", targetUrl),
+            ("@sig", signatureHeader),
+            ("@code", statusCode),
+            ("@att", attemptCount),
+            ("@st", status),
+            ("@dur", durationMs),
+            ("@now", NowParam()));
+    }
+
+    public async Task<IReadOnlyList<WebhookDeliveryEntity>> ListWebhookDeliveriesAsync(long repoId, int limit = 25, CancellationToken ct = default)
+    {
+        await using var conn = CreateConnection();
+        await conn.OpenAsync(ct);
+
+        const string sql = """
+            SELECT id, webhook_id, repo_id, event_name, target_url, signature_header, status_code, attempt_count, status, duration_ms, delivered_at
+            FROM webhook_deliveries
+            WHERE repo_id = @repoId
+            ORDER BY id DESC
+            LIMIT @limit;
+            """;
+
+        var list = new List<WebhookDeliveryEntity>();
+        await using var cmd = CreateCommand(conn, null, sql, ("@repoId", repoId), ("@limit", Math.Clamp(limit, 1, 100)));
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new WebhookDeliveryEntity
+            {
+                Id = Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+                WebhookId = Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture),
+                RepoId = Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture),
+                EventName = reader.GetString(3),
+                TargetUrl = reader.GetString(4),
+                SignatureHeader = reader.GetString(5),
+                StatusCode = Convert.ToInt32(reader.GetValue(6), CultureInfo.InvariantCulture),
+                AttemptCount = Convert.ToInt32(reader.GetValue(7), CultureInfo.InvariantCulture),
+                Status = reader.GetString(8),
+                DurationMs = Convert.ToDouble(reader.GetValue(9), CultureInfo.InvariantCulture),
+                DeliveredAt = ReadTimestamp(reader, 10)
+            });
+        }
+        return list;
+    }
+
+    public async Task<string> CreateSqliteHotBackupAsync(string backupDirectory, CancellationToken ct = default)
+    {
+        if (IsPostgres)
+            throw new InvalidOperationException("VACUUM INTO hot backup is specific to SQLite; use pg_dump for PostgreSQL.");
+
+        Directory.CreateDirectory(backupDirectory);
+        string timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+        string backupFile = Path.GetFullPath(Path.Combine(backupDirectory, $"gitea_backup_{timestamp}.db"));
+        string escapedPath = backupFile.Replace("'", "''", StringComparison.Ordinal);
+
+        await using var conn = CreateConnection();
+        await conn.OpenAsync(ct);
+        await ExecuteNonQueryAsync(conn, null, $"VACUUM INTO '{escapedPath}';", ct);
+        return backupFile;
+    }
+
+
+    // ==================== CI/CD ACTIONS WORKFLOW RUNS (ATOMIC SEQUENCE + CAS + ZERO N+1) ====================
+
+    public async Task<CiWorkflowRunEntity> CreateCiWorkflowRunAsync(
+        long repoId,
+        long triggeredByUserId,
+        string workflowName,
+        string triggerEvent,
+        string branch,
+        string commitSha,
+        CancellationToken ct = default)
+    {
+        return await ExecuteWithRetryAsync(async () =>
+        {
+            await using var conn = CreateConnection();
+            await conn.OpenAsync(ct);
+            await using var tx = await BeginWriteTransactionAsync(conn, ct);
+
+            string bumpSql = IsPostgres
+                ? "UPDATE repo_counters SET last_ci_run_index = last_ci_run_index + 1 WHERE repo_id = @repoId RETURNING last_ci_run_index;"
+                : "UPDATE repo_counters SET last_ci_run_index = last_ci_run_index + 1 WHERE repo_id = @repoId; SELECT last_ci_run_index FROM repo_counters WHERE repo_id = @repoId;";
+
+            long runIndex;
+            await using (var cmd = CreateCommand(conn, tx, bumpSql, ("@repoId", repoId)))
+            {
+                runIndex = Convert.ToInt64(await cmd.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+            }
+
+            object now = NowParam();
+            string insertSql = IsPostgres
+                ? """
+                  INSERT INTO ci_workflow_runs (repo_id, run_index, triggered_by_user_id, workflow_name, trigger_event, branch, commit_sha, status, logs_text, duration_ms, created_at, completed_at, row_version)
+                  VALUES (@repoId, @runIdx, @userId, @wfName, @ev, @branch, @sha, 'queued', 'Queued for execution...', 0, @now, NULL, 1)
+                  RETURNING id;
+                  """
+                : """
+                  INSERT INTO ci_workflow_runs (repo_id, run_index, triggered_by_user_id, workflow_name, trigger_event, branch, commit_sha, status, logs_text, duration_ms, created_at, completed_at, row_version)
+                  VALUES (@repoId, @runIdx, @userId, @wfName, @ev, @branch, @sha, 'queued', 'Queued for execution...', 0, @now, NULL, 1);
+                  SELECT last_insert_rowid();
+                  """;
+
+            await using (var cmd = CreateCommand(conn, tx, insertSql,
+                ("@repoId", repoId),
+                ("@runIdx", runIndex),
+                ("@userId", triggeredByUserId),
+                ("@wfName", workflowName),
+                ("@ev", triggerEvent),
+                ("@branch", branch),
+                ("@sha", commitSha),
+                ("@now", now)))
+            {
+                _ = await cmd.ExecuteScalarAsync(ct);
+            }
+
+            await tx.CommitAsync(ct);
+            return (await GetCiWorkflowRunAsync(repoId, runIndex, ct))!;
+        }, ct);
+    }
+
+    public Task<CiWorkflowRunEntity> CreateCiWorkflowRunAsync(
+        long repoId,
+        string workflowName,
+        string triggerEvent,
+        string branch,
+        string? commitSha,
+        long? triggeredByUserId,
+        CancellationToken ct = default)
+    {
+        return CreateCiWorkflowRunAsync(
+            repoId,
+            triggeredByUserId ?? 1,
+            workflowName,
+            triggerEvent,
+            branch,
+            string.IsNullOrWhiteSpace(commitSha) ? "0000000000000000000000000000000000000000" : commitSha,
+            ct);
+    }
+
+    public async Task<bool> TryClaimQueuedCiRunAsync(
+        long repoId, long runIdOrIndex, CancellationToken ct = default)
+    {
+        await using var conn = CreateConnection();
+        await conn.OpenAsync(ct);
+
+        const string sql = """
+            UPDATE ci_workflow_runs
+            SET status = 'running',
+                row_version = row_version + 1
+            WHERE repo_id = @repoId
+              AND id = @runId
+              AND status = 'queued';
+            """;
+
+        int affected = await ExecuteNonQueryAsync(conn, null, sql, ct,
+            ("@repoId", repoId),
+            ("@runId", runIdOrIndex));
+        return affected == 1;
+    }
+
+    public async Task<CiWorkflowRunEntity?> GetCiWorkflowRunByIdOrIndexAsync(
+        long repoId, long runIdOrIndex, CancellationToken ct = default)
+    {
+        await using var conn = CreateConnection();
+        await conn.OpenAsync(ct);
+
+        const string sql = """
+            SELECT
+                c.id,
+                c.repo_id,
+                c.run_index,
+                c.triggered_by_user_id,
+                u.username AS triggered_by_username,
+                c.workflow_name,
+                c.trigger_event,
+                c.branch,
+                c.commit_sha,
+                c.status,
+                c.logs_text,
+                c.duration_ms,
+                c.created_at,
+                c.completed_at,
+                c.row_version
+            FROM ci_workflow_runs c
+            INNER JOIN users u ON u.id = c.triggered_by_user_id
+            WHERE c.repo_id = @repoId AND (c.id = @idOrIdx OR c.run_index = @idOrIdx)
+            LIMIT 1;
+            """;
+
+        await using var cmd = CreateCommand(conn, null, sql, ("@repoId", repoId), ("@idOrIdx", runIdOrIndex));
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return null;
+        return MapCiWorkflowRun(reader);
+    }
+
+    public async Task<bool> TryClaimQueuedCiRunAsync(
+        long repoId, long runIndex, long expectedRowVersion, CancellationToken ct = default)
+    {
+        await using var conn = CreateConnection();
+        await conn.OpenAsync(ct);
+
+        const string sql = """
+            UPDATE ci_workflow_runs
+            SET status = 'running',
+                row_version = row_version + 1
+            WHERE repo_id = @repoId
+              AND run_index = @runIdx
+              AND status = 'queued'
+              AND row_version = @expectedRv;
+            """;
+
+        int affected = await ExecuteNonQueryAsync(conn, null, sql, ct,
+            ("@repoId", repoId),
+            ("@runIdx", runIndex),
+            ("@expectedRv", expectedRowVersion));
+        return affected == 1;
+    }
+
+    public async Task<bool> CompleteCiWorkflowRunAsync(
+        long repoId, long runIndex, string finalStatus, string logsText, double durationMs, CancellationToken ct = default)
+    {
+        return await ExecuteWithRetryAsync(async () =>
+        {
+            await using var conn = CreateConnection();
+            await conn.OpenAsync(ct);
+
+            const string sql = """
+                UPDATE ci_workflow_runs
+                SET status = @status,
+                    logs_text = @logs,
+                    duration_ms = @dur,
+                    completed_at = @now,
+                    row_version = row_version + 1
+                WHERE repo_id = @repoId
+                  AND run_index = @runIdx
+                  AND status IN ('running', 'queued');
+                """;
+
+            int affected = await ExecuteNonQueryAsync(conn, null, sql, ct,
+                ("@status", finalStatus),
+                ("@logs", logsText),
+                ("@dur", durationMs),
+                ("@now", NowParam()),
+                ("@repoId", repoId),
+                ("@runIdx", runIndex));
+            return affected == 1;
+        }, ct);
+    }
+
+    public async Task<CiWorkflowRunEntity?> GetCiWorkflowRunAsync(long repoId, long runIndex, CancellationToken ct = default)
+    {
+        await using var conn = CreateConnection();
+        await conn.OpenAsync(ct);
+
+        const string sql = """
+            SELECT
+                c.id,
+                c.repo_id,
+                c.run_index,
+                c.triggered_by_user_id,
+                u.username AS triggered_by_username,
+                c.workflow_name,
+                c.trigger_event,
+                c.branch,
+                c.commit_sha,
+                c.status,
+                c.logs_text,
+                c.duration_ms,
+                c.created_at,
+                c.completed_at,
+                c.row_version
+            FROM ci_workflow_runs c
+            INNER JOIN users u ON u.id = c.triggered_by_user_id
+            WHERE c.repo_id = @repoId AND c.run_index = @runIdx
+            LIMIT 1;
+            """;
+
+        await using var cmd = CreateCommand(conn, null, sql, ("@repoId", repoId), ("@runIdx", runIndex));
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return null;
+        return MapCiWorkflowRun(reader);
+    }
+
+    /// <summary>
+    /// ZERO N+1 QUERY: Lists paginated CI workflow runs with trigger user details in 2 bounded queries (1 COUNT + 1 SELECT INNER JOIN).
+    /// </summary>
+    public async Task<PagedResult<CiWorkflowRunEntity>> ListCiWorkflowRunsAsync(
+        long repoId, int page = 1, int pageSize = 25, CancellationToken ct = default)
+    {
+        page = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+        int offset = (page - 1) * pageSize;
+
+        await using var conn = CreateConnection();
+        await conn.OpenAsync(ct);
+
+        int total;
+        await using (var countCmd = CreateCommand(conn, null, "SELECT COUNT(*) FROM ci_workflow_runs WHERE repo_id = @repoId;", ("@repoId", repoId)))
+        {
+            total = Convert.ToInt32(await countCmd.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+        }
+
+        const string sql = """
+            SELECT
+                c.id,
+                c.repo_id,
+                c.run_index,
+                c.triggered_by_user_id,
+                u.username AS triggered_by_username,
+                c.workflow_name,
+                c.trigger_event,
+                c.branch,
+                c.commit_sha,
+                c.status,
+                c.logs_text,
+                c.duration_ms,
+                c.created_at,
+                c.completed_at,
+                c.row_version
+            FROM ci_workflow_runs c
+            INNER JOIN users u ON u.id = c.triggered_by_user_id
+            WHERE c.repo_id = @repoId
+            ORDER BY c.run_index DESC
+            LIMIT @limit OFFSET @offset;
+            """;
+
+        var list = new List<CiWorkflowRunEntity>();
+        await using var cmd = CreateCommand(conn, null, sql, ("@repoId", repoId), ("@limit", pageSize), ("@offset", offset));
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(MapCiWorkflowRun(reader));
+        }
+
+        return new PagedResult<CiWorkflowRunEntity>(list, page, pageSize, total);
+    }
+
     // ==================== TRANSACTION, RETRY & MAPPING HELPERS ====================
 
     private async Task<DbTransaction> BeginWriteTransactionAsync(DbConnection conn, CancellationToken ct)
@@ -2124,5 +2517,24 @@ public sealed class GiteaDbRepository
         CreatedAt = ReadTimestamp(r, 16),
         UpdatedAt = ReadTimestamp(r, 17),
         RowVersion = Convert.ToInt64(r.GetValue(18), CultureInfo.InvariantCulture)
+    };
+
+    private static CiWorkflowRunEntity MapCiWorkflowRun(DbDataReader r) => new()
+    {
+        Id = Convert.ToInt64(r.GetValue(0), CultureInfo.InvariantCulture),
+        RepoId = Convert.ToInt64(r.GetValue(1), CultureInfo.InvariantCulture),
+        RunIndex = Convert.ToInt64(r.GetValue(2), CultureInfo.InvariantCulture),
+        TriggeredByUserId = Convert.ToInt64(r.GetValue(3), CultureInfo.InvariantCulture),
+        TriggeredByUsername = r.GetString(4),
+        WorkflowName = r.GetString(5),
+        TriggerEvent = r.GetString(6),
+        Branch = r.GetString(7),
+        CommitSha = r.GetString(8),
+        Status = r.GetString(9),
+        LogsText = r.GetString(10),
+        DurationMs = Convert.ToDouble(r.GetValue(11), CultureInfo.InvariantCulture),
+        CreatedAt = ReadTimestamp(r, 12),
+        CompletedAt = r.IsDBNull(13) ? null : ReadTimestamp(r, 13),
+        RowVersion = Convert.ToInt64(r.GetValue(14), CultureInfo.InvariantCulture)
     };
 }

@@ -242,8 +242,8 @@ def main():
                 else:
                     print(f"  [PASS] C# Lexer & Token Balance Audit: {os.path.relpath(full_path, target_dir)}")
 
-    if checked_files < 8:
-        print(f"\n[FAIL] Expected at least 8 C# files, found only {checked_files}!")
+    if checked_files < 10:
+        print(f"\n[FAIL] Expected at least 10 C# files, found only {checked_files}!")
         sys.exit(1)
 
     if all_errors:

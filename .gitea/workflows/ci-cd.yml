@@ -1,0 +1,44 @@
+name: Per's Git — Self-Hosted Gitea Actions CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main", "master", "develop", "feature/**" ]
+  pull_request:
+    branches: [ "main", "master", "develop" ]
+
+env:
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_NOLOGO: true
+  GITEA_NET_TOKEN_SECRET: "GiteaActions-CI-Production-Grade-32Byte-SecretKey-2026!"
+
+jobs:
+  verify-and-release:
+    name: Full Verification Loop (Lexer + SQLite + Postgres + Zero N+1 + Race Tests)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gitea_ci
+          POSTGRES_PASSWORD: gitea_ci_password_2026
+          POSTGRES_DB: gitea_net_ci
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8.0 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Execute Unified Verification Pipeline (verify_all.sh)
+        env:
+          GITEA_POSTGRES_CONN: "Host=127.0.0.1;Port=5432;Database=gitea_net_ci;Username=gitea_ci;Password=gitea_ci_password_2026;Pooling=true;"
+        run: |
+          chmod +x verify_all.sh scripts/sqlite_hot_backup.sh
+          ./verify_all.sh

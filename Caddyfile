@@ -1,0 +1,49 @@
+# ==============================================================================
+# Per's Git (Gitea.Net) — Production Caddyfile
+# - Automatic Let's Encrypt HTTPS & HTTP/3 (QUIC)
+# - Zstandard (zstd) & Gzip compression for Web UI & REST APIs
+# - Unlimited request body streaming on /*.git/* for >500MB Git LFS / packfiles
+# - Internal IP restriction on /metrics
+# ==============================================================================
+{
+	servers {
+		protocols h1 h2 h3
+	}
+}
+
+{$PERS_GIT_DOMAIN:localhost} {
+	encode zstd gzip
+
+	# Block external access to Prometheus/OpenTelemetry /metrics endpoint
+	@externalMetrics {
+		path /metrics*
+		not remote_ip 127.0.0.1 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+	}
+	respond @externalMetrics "Forbidden: Metrics restricted to internal network" 403
+
+	# Git Smart HTTP routes: disable request buffering and size limits for >500MB packfiles
+	@gitSmartHttp {
+		path /*/*.git/*
+	}
+	handle @gitSmartHttp {
+		request_body {
+			max_size 10GB
+		}
+		reverse_proxy pers-git-server:5000 {
+			flush_interval -1
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
+	# Standard Web UI & REST API routes
+	handle {
+		request_body {
+			max_size 50MB
+		}
+		reverse_proxy pers-git-server:5000 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+}

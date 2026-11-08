@@ -7,7 +7,8 @@ IMPORTANT TRANSPARENCY NOTE:
 - This reference harness executes against the real system `git` CLI (`git version 2.39.5`) and `sqlite3` engine
   inside the sandbox to validate the SQL schema/migrations, Git plumbing commands (`hash-object`, `update-index --replace`,
   `write-tree`, `commit-tree`, `merge-tree --write-tree`, `merge-base --is-ancestor`), Git Smart HTTP protocol
-  (including a >30MB large packfile push test), PAT scopes, and SQLite concurrency.
+  (including a >30MB large packfile push test), PAT scopes, CI/CD Actions atomic sequences & CAS worker claiming,
+  Zero N+1 SQL queries, and SQLite concurrency.
 """
 import base64
 import concurrent.futures
@@ -158,7 +159,8 @@ class ReferenceHarnessEnv:
             );
             CREATE TABLE IF NOT EXISTS repo_counters (
                 repo_id BIGINT PRIMARY KEY,
-                last_issue_index BIGINT NOT NULL DEFAULT 0
+                last_issue_index BIGINT NOT NULL DEFAULT 0,
+                last_ci_run_index BIGINT NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS issues (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -203,6 +205,24 @@ class ReferenceHarnessEnv:
                 is_active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS ci_workflow_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id BIGINT NOT NULL,
+                run_index BIGINT NOT NULL,
+                workflow_name VARCHAR(140) NOT NULL,
+                event_type VARCHAR(32) NOT NULL,
+                branch VARCHAR(120) NOT NULL,
+                commit_sha VARCHAR(64) NOT NULL,
+                status VARCHAR(24) NOT NULL DEFAULT 'queued',
+                triggered_by_user_id BIGINT NOT NULL,
+                duration_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+                logs_text TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                started_at TEXT NULL,
+                completed_at TEXT NULL,
+                row_version BIGINT NOT NULL DEFAULT 1,
+                UNIQUE(repo_id, run_index)
+            );
         """)
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         h_admin, s_admin = hash_password_600k("Admin@12345")
@@ -225,11 +245,11 @@ class ReferenceHarnessEnv:
                      (hashlib.sha256(self.readonly_pat.encode()).hexdigest(), now))
 
         conn.execute("INSERT INTO repositories (owner_id, name, description, is_private, default_branch, open_issues_count, open_prs_count, created_at, updated_at) VALUES (1, 'gitea-dotnet-core', 'Public Repo', 0, 'main', 1, 1, ?, ?)", (now, now))
-        conn.execute("INSERT INTO repo_counters (repo_id, last_issue_index) VALUES (1, 2)")
+        conn.execute("INSERT INTO repo_counters (repo_id, last_issue_index, last_ci_run_index) VALUES (1, 2, 0)")
         conn.execute("INSERT INTO repo_collaborators (repo_id, user_id, permission, created_at) VALUES (1, 2, 'write', ?)", (now,))
 
         conn.execute("INSERT INTO repositories (owner_id, name, description, is_private, default_branch, open_issues_count, open_prs_count, created_at, updated_at) VALUES (1, 'private-vault', 'Private Repo', 1, 'main', 0, 0, ?, ?)", (now, now))
-        conn.execute("INSERT INTO repo_counters (repo_id, last_issue_index) VALUES (2, 0)")
+        conn.execute("INSERT INTO repo_counters (repo_id, last_issue_index, last_ci_run_index) VALUES (2, 0, 0)")
 
         conn.execute("INSERT INTO issues (repo_id, issue_index, author_id, title, body, state, labels_csv, comments_count, created_at, updated_at, row_version) VALUES (1, 1, 2, 'Initial Issue #1', 'Body', 'open', 'bug', 0, ?, ?, 1)", (now, now))
         conn.execute("INSERT INTO pull_requests (repo_id, pull_index, author_id, title, body, source_branch, target_branch, state, is_merged, created_at, updated_at, row_version) VALUES (1, 2, 2, 'Atomic Merge PR #2', 'Body', 'feature/zero-n-plus-one', 'main', 'open', 0, ?, ?, 1)", (now, now))
@@ -444,7 +464,6 @@ def make_handler(env: ReferenceHarnessEnv):
                         return self.send_json(404, {"error": "Not found"})
                     can_read, can_write, can_admin = self.check_permissions(conn, row, actor)
                     if not can_read:
-                        # Return 404 for private repos to prevent existence enumeration
                         return self.send_json(404, {"error": "Repository not found."})
                     return self.send_json(200, {"repository": {"id": row[0], "ownerUsername": row[2], "name": row[3], "isPrivate": bool(row[5]), "openIssuesCount": row[8], "openPrsCount": row[9]}, "permissions": {"canRead": can_read, "canWrite": can_write, "canAdmin": can_admin}})
 
@@ -461,6 +480,30 @@ def make_handler(env: ReferenceHarnessEnv):
                     total = conn.execute("SELECT COUNT(*) FROM issues WHERE repo_id = ?;", (row[0],)).fetchone()[0]
                     issues = conn.execute("SELECT i.id, i.issue_index, u.username, i.title, i.state, i.comments_count FROM issues i INNER JOIN users u ON u.id = i.author_id WHERE i.repo_id = ? ORDER BY i.issue_index DESC LIMIT 25 OFFSET 0;", (row[0],)).fetchall()
                     return self.send_json(200, {"items": [{"id": i[0], "issueIndex": i[1], "authorUsername": i[2], "title": i[3], "state": i[4], "commentsCount": i[5]} for i in issues], "totalCount": total}, {"X-Sql-Count": str(len(queries_executed))})
+
+                m_actions = re.match(r"^/api/v1/repos/([^/]+)/([^/]+)/actions/runs$", path)
+                if m_actions:
+                    owner, rname = m_actions.group(1), m_actions.group(2)
+                    row = conn.execute("SELECT r.id, r.owner_id, u.username, r.name, r.description, r.is_private FROM repositories r INNER JOIN users u ON u.id = r.owner_id WHERE u.username = ? AND r.name = ? LIMIT 1;", (owner, rname)).fetchone()
+                    if not row:
+                        return self.send_json(404, {"error": "Not found"})
+                    can_read, _, _ = self.check_permissions(conn, row, actor)
+                    if not can_read:
+                        return self.send_json(404, {"error": "Repository not found."})
+                    queries_executed.clear()
+                    total = conn.execute("SELECT COUNT(*) FROM ci_workflow_runs WHERE repo_id = ?;", (row[0],)).fetchone()[0]
+                    runs = conn.execute("""
+                        SELECT w.id, w.repo_id, w.run_index, w.workflow_name, w.event_type, w.branch, w.commit_sha, w.status, u.username, w.duration_ms
+                        FROM ci_workflow_runs w
+                        INNER JOIN users u ON u.id = w.triggered_by_user_id
+                        WHERE w.repo_id = ?
+                        ORDER BY w.run_index DESC LIMIT 50 OFFSET 0;
+                    """, (row[0],)).fetchall()
+                    return self.send_json(
+                        200,
+                        {"items": [{"id": w[0], "repoId": w[1], "runIndex": w[2], "workflowName": w[3], "eventType": w[4], "branch": w[5], "commitSha": w[6], "status": w[7], "triggeredByUsername": w[8], "durationMs": w[9]} for w in runs], "totalCount": total},
+                        {"X-Sql-Count": str(len(queries_executed))}
+                    )
 
                 m_git_refs = re.match(r"^/([^/]+)/([^/]+)\.git/info/refs$", path)
                 if m_git_refs:
@@ -594,6 +637,57 @@ def make_handler(env: ReferenceHarnessEnv):
                         conn.execute("COMMIT;")
 
                     return self.send_json(201, {"repoId": row[0], "issueIndex": idx, "title": title, "state": "open"})
+
+                m_create_ci = re.match(r"^/api/v1/repos/([^/]+)/([^/]+)/actions/runs$", path)
+                if m_create_ci:
+                    if not actor:
+                        return self.send_json(401, {"error": "Unauthorized"})
+                    if "repo:write" not in actor["scopes"] and "admin" not in actor["scopes"]:
+                        return self.send_json(403, {"error": "Insufficient PAT scope: repo:write required"})
+                    owner, rname = m_create_ci.group(1), m_create_ci.group(2)
+                    row = conn.execute("SELECT r.id, r.owner_id, u.username, r.name, r.description, r.is_private FROM repositories r INNER JOIN users u ON u.id = r.owner_id WHERE u.username = ? AND r.name = ? LIMIT 1;", (owner, rname)).fetchone()
+                    if not row:
+                        return self.send_json(404, {"error": "Not found"})
+                    _, can_write, _ = self.check_permissions(conn, row, actor)
+                    if not can_write:
+                        return self.send_json(403, {"error": "Forbidden"})
+
+                    req_json = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+                    wf_name = (req_json.get("workflowName") or "Per's Git Production CI/CD Pipeline").strip()
+                    branch = (req_json.get("branch") or "main").strip()
+                    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+                    with env.db_lock:
+                        conn.execute("BEGIN IMMEDIATE;")
+                        conn.execute("UPDATE repo_counters SET last_ci_run_index = last_ci_run_index + 1 WHERE repo_id = ?;", (row[0],))
+                        run_idx = conn.execute("SELECT last_ci_run_index FROM repo_counters WHERE repo_id = ?;", (row[0],)).fetchone()[0]
+                        cur = conn.execute("""
+                            INSERT INTO ci_workflow_runs (repo_id, run_index, workflow_name, event_type, branch, commit_sha, status, triggered_by_user_id, duration_ms, logs_text, created_at, row_version)
+                            VALUES (?, ?, ?, 'workflow_dispatch', ?, '8f4e2c1a90b3', 'queued', ?, 0, 'Queued', ?, 1);
+                        """, (row[0], run_idx, wf_name, branch, actor["id"], now))
+                        run_id = cur.lastrowid
+                        conn.execute("COMMIT;")
+
+                    return self.send_json(201, {"id": run_id, "repoId": row[0], "runIndex": run_idx, "status": "queued"})
+
+                m_claim_ci = re.match(r"^/api/v1/repos/([^/]+)/([^/]+)/actions/runs/(\d+)/claim$", path)
+                if m_claim_ci:
+                    if not actor:
+                        return self.send_json(401, {"error": "Unauthorized"})
+                    owner, rname, run_id = m_claim_ci.group(1), m_claim_ci.group(2), int(m_claim_ci.group(3))
+                    row = conn.execute("SELECT r.id, r.owner_id, u.username, r.name, r.description, r.is_private FROM repositories r INNER JOIN users u ON u.id = r.owner_id WHERE u.username = ? AND r.name = ? LIMIT 1;", (owner, rname)).fetchone()
+                    if not row:
+                        return self.send_json(404, {"error": "Not found"})
+                    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    with env.db_lock:
+                        cur = conn.execute("""
+                            UPDATE ci_workflow_runs
+                            SET status = 'running', started_at = ?, row_version = row_version + 1
+                            WHERE repo_id = ? AND id = ? AND status = 'queued';
+                        """, (now, row[0], run_id))
+                        if cur.rowcount != 1:
+                            return self.send_json(409, {"error": "CAS conflict: CI run already claimed by another worker."})
+                    return self.send_json(200, {"claimed": True, "runId": run_id})
 
                 m_merge_pr = re.match(r"^/api/v1/repos/([^/]+)/([^/]+)/pulls/(\d+)/merge$", path)
                 if m_merge_pr:
@@ -812,6 +906,47 @@ To run the C# binary, xUnit tests, and JMeter CLI on your machine, execute ./ver
         assert sum(1 for s in merge_statuses if s == 200) == 1
         assert sum(1 for s in merge_statuses if s == 409) == 49
         log("  [PASS] 50-Thread Concurrent PR Merge (Bearer PAT): 1 winner (HTTP 200) and 49 conflicts (HTTP 409).")
+
+        # 5. CI/CD Actions 50-Thread Concurrent Run Creation Race + 50-Thread CAS Worker Claim Race + Zero N+1 SQL Check
+        def ci_create_worker(i: int):
+            st, body, _, ms = http_req(
+                f"{base_url}/api/v1/repos/gitea-admin/gitea-dotnet-core/actions/runs",
+                "POST",
+                {"branch": "main", "workflowName": "Per's Git Production CI/CD Pipeline"},
+                bearer_token=env.write_pat
+            )
+            record_sample("POST /api/v1/repos/actions/runs (50-Thread CI Race)", st, ms, st == 201, f"CiCreateRaceGroup-4-{i}")
+            return st, body.get("runIndex") if isinstance(body, dict) else None, body.get("id") if isinstance(body, dict) else None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as pool:
+            ci_outcomes = list(pool.map(ci_create_worker, range(1, 51)))
+
+        ci_indices = sorted([o[1] for o in ci_outcomes if o[1] is not None])
+        assert ci_indices == list(range(1, 51))
+        first_ci_id = [o[2] for o in ci_outcomes if o[1] == 1][0]
+        log("  [PASS] 50-Thread Concurrent CI/CD Workflow Run Creation: Generated unique sequential RunIndex #1..#50.")
+
+        def ci_claim_worker(i: int):
+            st, _, _, ms = http_req(
+                f"{base_url}/api/v1/repos/gitea-admin/gitea-dotnet-core/actions/runs/{first_ci_id}/claim",
+                "POST",
+                {},
+                bearer_token=env.write_pat
+            )
+            record_sample("POST /api/v1/repos/actions/runs/claim (50-Thread CAS Race)", st, ms, st in (200, 409), f"CiClaimRaceGroup-5-{i}")
+            return st
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as pool:
+            claim_statuses = list(pool.map(ci_claim_worker, range(1, 51)))
+
+        assert sum(1 for s in claim_statuses if s == 200) == 1
+        assert sum(1 for s in claim_statuses if s == 409) == 49
+        log("  [PASS] 50-Thread Concurrent CI/CD Worker CAS Claim (`WHERE status='queued'`): 1 winner (HTTP 200) and 49 rejections (HTTP 409).")
+
+        st_ci_list, ci_list_body, ci_headers, ms_ci_list = http_req(f"{base_url}/api/v1/repos/gitea-admin/gitea-dotnet-core/actions/runs")
+        sql_count = int(ci_headers.get("X-Sql-Count", "999"))
+        assert st_ci_list == 200 and len(ci_list_body["items"]) == 50 and sql_count == 2
+        log(f"  [PASS] CI/CD Actions List Zero N+1 Verification: Fetched 50 runs with user metadata in exactly {sql_count} SQL queries (1 COUNT + 1 SELECT JOIN).")
 
         # Calculate p50, p95, p99 latencies
         latencies = sorted([r[1] for r in jtl_records])

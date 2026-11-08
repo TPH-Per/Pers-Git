@@ -1,0 +1,72 @@
+version: "3.9"
+
+services:
+  pers-git-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pers-git-server
+    restart: unless-stopped
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:5000
+      - GITEA_NET_TOKEN_SECRET=${GITEA_NET_TOKEN_SECRET:-PersGit-Production-Ready-32Byte-Minimum-Secret-Key-2026!}
+      - Database__Provider=${DB_PROVIDER:-Sqlite}
+      - Database__SqliteConnectionString=Data Source=/app/App_Data/gitea_net.db;Mode=ReadWriteCreate;
+      - Security__AllowRegistration=true
+      - Security__RateLimitPermitLimit=100
+      - Security__AuthRateLimitPermitLimit=5
+      - Security__RateLimitWindowSeconds=60
+    volumes:
+      - pers_git_data:/app/App_Data
+      - pers_git_backups:/backups
+    expose:
+      - "5000"
+    networks:
+      - pers_git_net
+
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: pers-git-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - pers-git-server
+    networks:
+      - pers_git_net
+
+  sqlite-hot-backup:
+    image: alpine:3.20
+    container_name: pers-git-sqlite-backup
+    restart: unless-stopped
+    command: >
+      sh -c "apk add --no-cache sqlite bash coreutils &&
+             while true; do
+               /scripts/sqlite_hot_backup.sh /data/gitea_net.db /backups 7;
+               sleep 21600;
+             done"
+    volumes:
+      - pers_git_data:/data:ro
+      - pers_git_backups:/backups
+      - ./scripts/sqlite_hot_backup.sh:/scripts/sqlite_hot_backup.sh:ro
+    depends_on:
+      - pers-git-server
+    networks:
+      - pers_git_net
+
+volumes:
+  pers_git_data:
+  pers_git_backups:
+  caddy_data:
+  caddy_config:
+
+networks:
+  pers_git_net:
+    driver: bridge

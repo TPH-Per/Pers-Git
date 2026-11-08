@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 112 112" width="64" height="64" role="img" aria-label="Per's Git Icon">
+  <defs>
+    <linearGradient id="favTerracotta" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#D97757" />
+      <stop offset="100%" stop-color="#B85030" />
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="108" height="108" rx="26" fill="#FAF9F6" stroke="#D5D0C5" stroke-width="3" />
+  <path d="M 34 30 C 66 30, 84 32, 84 51 C 84 70, 66 72, 34 72"
+        fill="none" stroke="url(#favTerracotta)" stroke-width="7.5" stroke-linecap="round" />
+  <line x1="34" y1="88" x2="34" y2="24" stroke="#141413" stroke-width="8" stroke-linecap="round" />
+  <circle cx="34" cy="86" r="7" fill="#FAF9F6" stroke="#141413" stroke-width="4.5" />
+  <circle cx="34" cy="72" r="6" fill="#FAF9F6" stroke="#141413" stroke-width="4" />
+  <circle cx="34" cy="30" r="7" fill="#FAF9F6" stroke="#141413" stroke-width="4.5" />
+  <circle cx="84" cy="51" r="8" fill="#FAF9F6" stroke="#C96442" stroke-width="5" />
+</svg>
