@@ -60,7 +60,7 @@ public sealed class IsolatedGiteaHost : IDisposable
             var csb = new NpgsqlConnectionStringBuilder(_rawPgConn)
             {
                 SearchPath = $"{_schemaName},public",
-                MaxPoolSize = 25,
+                MaxPoolSize = 100,
                 Timeout = 30
             };
             pgConn = csb.ConnectionString;

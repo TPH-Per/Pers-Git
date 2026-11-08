@@ -36,9 +36,20 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - name: Tune PostgreSQL Server max_connections
+        run: |
+          PG_CONTAINER=$(docker ps -q --filter "ancestor=postgres:16-alpine" | head -n 1)
+          if [ -n "$PG_CONTAINER" ]; then
+            echo "Found PostgreSQL container: $PG_CONTAINER"
+            docker exec "$PG_CONTAINER" sh -c 'echo "max_connections = 300" >> "$PGDATA/postgresql.conf"'
+            docker restart "$PG_CONTAINER"
+            until docker exec "$PG_CONTAINER" pg_isready -U gitea_ci; do sleep 1; done
+            docker exec "$PG_CONTAINER" psql -U gitea_ci -d gitea_net_ci -c "SHOW max_connections;"
+          fi
+
       - name: Execute Unified Verification Pipeline (verify_all.sh)
         env:
-          GITEA_POSTGRES_CONN: "Host=127.0.0.1;Port=5432;Database=gitea_net_ci;Username=gitea_ci;Password=gitea_ci_password_2026;Pooling=true;Maximum Pool Size=25;"
+          GITEA_POSTGRES_CONN: "Host=127.0.0.1;Port=5432;Database=gitea_net_ci;Username=gitea_ci;Password=gitea_ci_password_2026;Pooling=true;Maximum Pool Size=100;"
         run: |
           chmod +x verify_all.sh scripts/sqlite_hot_backup.sh
           ./verify_all.sh
